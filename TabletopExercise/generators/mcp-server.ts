@@ -28,6 +28,7 @@ import {
   type SectionPresence,
 } from './schema.ts';
 import { generateTabletopHTML } from './generate-pdf.ts';
+import { generateExerciseQmd } from './generate-qmd.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -59,8 +60,19 @@ try {
 // ---------------------------------------------------------------------------
 
 const MALMON_FAMILIES: readonly string[] = [
-  // Placeholder — replace with real family names from klausagnoletti/malware-and-monsters
-  // e.g. 'Crypton', 'Vipera', 'Rottenberg'
+  'Code Red',
+  'FakeBat',
+  'GaboonGrabber',
+  'Gh0st RAT',
+  'LitterDrifter',
+  'LockBit',
+  'Noodle RAT',
+  'Poison Ivy',
+  'Raspberry Robin',
+  'Stuxnet',
+  'The Inquisitor',
+  'WannaCry',
+  'WireLurker',
 ];
 
 // ---------------------------------------------------------------------------
@@ -523,7 +535,43 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Tool 6: list_scenario_cards
+// Tool 6: generate_exercise_qmd
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'generate_exercise_qmd',
+  'Generate native Quarto markdown for the M&M handbook: appends 4 sections to index.qmd and writes handout-a/b QMD files. Use instead of generate_exercise when the target is a Quarto book.',
+  {
+    exercise_data: z.record(z.unknown()).describe('Validated exercise data object'),
+    output_dir: z.string().describe('Scenario directory for handout files and exercise-data.json'),
+    append_to: z.string().describe('Path to index.qmd — the 4 sections are appended here'),
+  },
+  async ({ exercise_data, output_dir, append_to }) => {
+    if (!rejectTraversal(output_dir) || !rejectTraversal(append_to)) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Path traversal rejected' }) }] };
+    }
+
+    const parsed = TabletopExerciseDataSchema.safeParse(exercise_data);
+    if (!parsed.success) {
+      const errors = parsed.error.issues.map(i => ({ path: i.path.join('.'), message: i.message }));
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Schema validation failed', errors }) }] };
+    }
+
+    try {
+      const result = await generateExerciseQmd(
+        parsed.data as Parameters<typeof generateExerciseQmd>[0],
+        output_dir,
+        append_to
+      );
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }] };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool 7: list_scenario_cards
 // ---------------------------------------------------------------------------
 
 server.tool(

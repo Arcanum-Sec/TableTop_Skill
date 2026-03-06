@@ -119,12 +119,13 @@ console.log('\nTest 1: tools/list');
   const expected = [
     'check_scenario_completeness',
     'generate_exercise',
+    'generate_exercise_qmd',
     'list_scenario_cards',
     'merge_exercise_data',
     'validate_exercise_data',
     'validate_m_and_m_formatting',
   ];
-  assert(JSON.stringify(names) === JSON.stringify(expected), `6 tools registered: ${names.join(', ')}`);
+  assert(JSON.stringify(names) === JSON.stringify(expected), `7 tools registered: ${names.join(', ')}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +371,233 @@ console.log('\nTest 12: generate_exercise');
     assert(partContent.includes('<!DOCTYPE html'), 'participant.html is valid HTML');
     assert(facilContent.length > partContent.length, 'facilitator.html is larger (has facilitator-only content)');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: generate_exercise_qmd — basic QMD generation
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 13: generate_exercise_qmd (basic generation)');
+{
+  const tmpIndexPath = '/tmp/test-index-basic.qmd';
+  const tmpQmdDir = '/tmp/test-qmd-basic';
+  await mkdir(tmpQmdDir, { recursive: true });
+
+  const exerciseData = {
+    title: 'QMD Test Exercise',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert fires',
+      severity: 'high', scenario: 'An alert fires on the monitoring dashboard.',
+      expectedResponse: 'Investigate the alert.',
+    }],
+    gaps: [{
+      priority: 'high', title: 'No incident runbook',
+      what_the_scenario_revealed: 'Responders had no documented runbook.',
+      why_it_matters: 'Increases mean time to respond.',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: tmpQmdDir, append_to: tmpIndexPath },
+    })
+  ) as { appended_to?: string; sections_written?: string[]; error?: string };
+
+  assert(!result.error, `No QMD generation error: ${result.error ?? ''}`);
+  assert(result.appended_to === tmpIndexPath, 'Returns correct appended_to path');
+  assert(Array.isArray(result.sections_written), 'Returns sections_written array');
+  assert(result.sections_written!.includes('Inject Sequence'), 'Wrote Inject Sequence section');
+  assert(result.sections_written!.includes('Post-Session Gap Analysis'), 'Wrote Gap Analysis section');
+
+  const indexContent = await Bun.file(tmpIndexPath).text().catch(() => '');
+  assert(indexContent.includes('## Inject Sequence'), 'index.qmd contains Inject Sequence heading');
+  assert(indexContent.includes('## Post-Session Gap Analysis'), 'index.qmd contains Gap Analysis heading');
+  assert(indexContent.includes('Alert fires'), 'index.qmd contains inject title');
+
+  const dataJson = await Bun.file(join(tmpQmdDir, 'exercise-data.json')).text().catch(() => '');
+  assert(dataJson.includes('QMD Test Exercise'), 'exercise-data.json written to output_dir');
+
+  await unlink(tmpIndexPath).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: generate_exercise_qmd — handout generation
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 14: generate_exercise_qmd (handout generation)');
+{
+  const tmpIndexPath = '/tmp/test-index-handout.qmd';
+  const tmpQmdDir = '/tmp/test-qmd-handout';
+  await mkdir(tmpQmdDir, { recursive: true });
+
+  const exerciseData = {
+    title: 'Handout Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high',
+      scenario: 'Alert fires.', expectedResponse: 'Investigate.',
+    }],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001', type: 'log', title: 'SCADA Diagnostics',
+      handout_letter: 'A', filename: 'scada-diagnostics.qmd',
+      artifact_content: 'Device 192.0.2.10 reported error code 0x4F.',
+      im_notes_bullets: ['This log is intentionally truncated.'],
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: tmpQmdDir, append_to: tmpIndexPath },
+    })
+  ) as { handout_a_path?: string; handout_b_path?: string; error?: string };
+
+  assert(!result.error, `No handout generation error: ${result.error ?? ''}`);
+  assert(typeof result.handout_a_path === 'string', 'Returns handout_a_path');
+  assert(!result.handout_b_path, 'No handout_b_path when only one artifact');
+
+  if (result.handout_a_path) {
+    const handoutContent = await Bun.file(result.handout_a_path).text().catch(() => '');
+    assert(handoutContent.includes('Handout A'), 'handout-a contains "Handout A"');
+    assert(handoutContent.includes('SCADA Diagnostics'), 'handout-a contains artifact title');
+    assert(handoutContent.includes('192.0.2.10'), 'handout-a contains TEST-NET IP (allowed)');
+    assert(handoutContent.includes('im-notes'), 'handout-a contains IM notes div');
+  }
+
+  await unlink(tmpIndexPath).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: generate_exercise_qmd — em dash guard
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 15: generate_exercise_qmd (em dash guard)');
+{
+  const exerciseData = {
+    title: 'Em Dash Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high',
+      scenario: 'A critical alert\u2014investigate immediately.',  // em dash
+      expectedResponse: 'Investigate.',
+    }],
+    gaps: [],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: '/tmp', append_to: '/tmp/test-em-dash.qmd' },
+    })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns error for em dash in content');
+  assert(
+    result.error!.toLowerCase().includes('em dash') || result.error!.includes('\u2014'),
+    'Error mentions em dash'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: generate_exercise_qmd — contemporary read_aloud names malmon family
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 16: generate_exercise_qmd (contemporary read_aloud violation)');
+{
+  const exerciseData = {
+    title: 'Contemporary Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    scenario_type: 'contemporary',
+    scenario: { malmon_family: 'LockBit' },
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high',
+      scenario: 'LockBit ransomware has encrypted your files.',  // names malmon family
+      expectedResponse: 'Isolate affected systems.',
+    }],
+    gaps: [],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: '/tmp', append_to: '/tmp/test-malmon.qmd' },
+    })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns error when malmon named in contemporary read_aloud');
+  assert(result.error!.includes('LockBit'), 'Error mentions the malmon family name');
+}
+
+// ---------------------------------------------------------------------------
+// Test 17: generate_exercise_qmd — real IP in artifact_content rejected
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 17: generate_exercise_qmd (real IP in artifact_content)');
+{
+  const exerciseData = {
+    title: 'IP Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high',
+      scenario: 'Alert fires.', expectedResponse: 'Investigate.',
+    }],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001', type: 'log', title: 'Server log',
+      handout_letter: 'A',
+      artifact_content: 'Connection from 1.2.3.4 detected.',  // real routable IP
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: '/tmp', append_to: '/tmp/test-ip.qmd' },
+    })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns error for real routable IP in artifact_content');
+  assert(
+    result.error!.includes('1.2.3.4') || result.error!.toLowerCase().includes('ip'),
+    'Error identifies the offending IP'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: generate_exercise_qmd — path traversal rejected
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 18: generate_exercise_qmd (path traversal)');
+{
+  const exerciseData = {
+    title: 'Traversal Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: {
+        exercise_data: exerciseData,
+        output_dir: '/tmp/../../etc',
+        append_to: '/tmp/test.qmd',
+      },
+    })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns error for path traversal in output_dir');
+  assert(result.error!.toLowerCase().includes('traversal'), 'Error mentions path traversal');
 }
 
 // ---------------------------------------------------------------------------

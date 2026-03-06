@@ -45,6 +45,12 @@ export const ObjectiveSchema = z.object({
   successCriteria: z.array(z.string()),
 });
 
+/** QMD-format conditional branch (if team [condition] → IM response) */
+export const QMDConditionalBranchSchema = z.object({
+  condition: z.string().min(1),
+  im_response: z.string().min(1),
+});
+
 export const InjectSchema = z.object({
   id: z.string().min(1),
   time: z.string().min(1),
@@ -56,6 +62,15 @@ export const InjectSchema = z.object({
   expectedResponse: z.string(),
   discussionQuestions: z.array(z.string()).optional(),
   conditionalResponses: z.array(ConditionalResponseSchema).optional(),
+
+  // QMD-specific fields (M&M handbook format)
+  trigger: z.string().optional(),
+  read_aloud: z.string().optional(),
+  artifact_inline: z.string().optional(),
+  hint_if_stuck: z.string().optional(),
+  red_flag: z.string().optional(),
+  success_indicator: z.string().optional(),
+  conditional_branches: z.array(QMDConditionalBranchSchema).optional(),
 });
 
 export const AtomicSchema = z.object({
@@ -73,11 +88,17 @@ export const AtomicSchema = z.object({
 export const GapSchema = z.object({
   priority: SeverityLowerSchema,
   title: z.string().min(1),
-  status: z.string(),
-  trigger: z.string(),
-  requiredProcedures: z.array(z.string()),
-  impact: z.string(),
-  recommendation: z.string(),
+  // HTML-generator fields
+  status: z.string().optional(),
+  trigger: z.string().optional(),
+  requiredProcedures: z.array(z.string()).optional(),
+  impact: z.string().optional(),
+  recommendation: z.string().optional(),
+  // QMD-specific fields (M&M debrief format)
+  what_the_scenario_revealed: z.string().optional(),
+  why_it_matters: z.string().optional(),
+  suggested_remediation: z.array(z.string()).optional(),
+  debrief_question: z.string().optional(),
 });
 
 export const GapStatsSchema = z.object({
@@ -96,19 +117,55 @@ export const NPCDialogueLineSchema = z.object({
   response: z.string().min(1),
 });
 
+/** QMD-format NPC dialogue lines with three named emotional beats */
+export const NPCDialogueLinesQMDSchema = z.object({
+  under_pressure: z.string().min(1),
+  escalating: z.string().min(1),
+  conceding: z.string().min(1),
+});
+
 export const NPCDialogueSchema = z.object({
   npcName: z.string().min(1),
   role: z.string().min(1),
-  triggerContext: z.string(),
-  lines: z.array(NPCDialogueLineSchema).min(1),
+  triggerContext: z.string().optional(),
+  // Accepts either the original prompt/response array or the QMD under_pressure/escalating/conceding object
+  lines: z.union([
+    z.array(NPCDialogueLineSchema).min(1),
+    NPCDialogueLinesQMDSchema,
+  ]).optional(),
+});
+
+export const KeyDiscoveryQuestionSchema = z.object({
+  question: z.string().min(1),
+  answer_and_facilitation: z.string(),
 });
 
 export const ArtifactSchema = z.object({
   id: z.string().min(1),
   type: z.enum(['screenshot', 'log', 'email', 'document', 'alert', 'other']),
   title: z.string().min(1),
-  content: z.string(),
+  content: z.string().optional(),
   linkedInjectId: z.string().optional(),
+  // QMD handout fields
+  filename: z.string().optional(),           // used to derive handout slug
+  handout_letter: z.enum(['A', 'B']).optional(),
+  scene_context: z.string().optional(),
+  section_heading: z.string().optional(),
+  artifact_content: z.string().optional(),   // must use TEST-NET IPs + .example TLD
+  im_notes_bullets: z.array(z.string()).optional(),
+  key_discovery_questions: z.array(KeyDiscoveryQuestionSchema).optional(),
+  facilitation_notes: z.array(z.string()).optional(),
+});
+
+// ---------------------------------------------------------------------------
+// M&M QMD-specific schemas
+// ---------------------------------------------------------------------------
+
+export const RedHerringSchema = z.object({
+  title: z.string().min(1),
+  what_points_to_it: z.array(z.string()).min(1),
+  why_its_wrong: z.string().min(1),
+  im_resolution_script: z.string().min(1),
 });
 
 // ---------------------------------------------------------------------------
@@ -182,6 +239,17 @@ export const TabletopExerciseDataSchema = z.object({
   // M&M enrichment sections
   npcDialogue: z.array(NPCDialogueSchema).optional(),
   artifacts: z.array(ArtifactSchema).optional(),
+  red_herrings: z.array(RedHerringSchema).optional(),
+
+  // M&M nested metadata (scenario_type also available at top level for backwards compat)
+  metadata: z.object({
+    scenario_type: ScenarioTypeSchema.optional(),
+  }).passthrough().optional(),
+
+  // M&M scenario info (malmon_family used for contemporary read_aloud validation)
+  scenario: z.object({
+    malmon_family: z.string().optional(),
+  }).passthrough().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -206,3 +274,6 @@ export type Gap = z.infer<typeof GapSchema>;
 export type Atomic = z.infer<typeof AtomicSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
 export type NPCDialogue = z.infer<typeof NPCDialogueSchema>;
+export type RedHerring = z.infer<typeof RedHerringSchema>;
+export type NPCDialogueLinesQMD = z.infer<typeof NPCDialogueLinesQMDSchema>;
+export type KeyDiscoveryQuestion = z.infer<typeof KeyDiscoveryQuestionSchema>;
