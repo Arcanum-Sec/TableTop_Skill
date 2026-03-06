@@ -1791,4 +1791,35 @@ if (import.meta.main) {
     });
 }
 
+/**
+ * Generate a complete HTML document from exercise data.
+ *
+ * mode='facilitator' — full document including facilitator notes,
+ *   expected responses, conditional responses, and gap analysis.
+ * mode='participant' — spoilers stripped: no expectedResponse,
+ *   no conditionalResponses, no discussionQuestions, no gap analysis,
+ *   no facilitatorGuide.
+ */
+export function generateTabletopHTML(
+    data: TabletopExerciseData,
+    mode: 'facilitator' | 'participant'
+): string {
+    if (mode === 'facilitator') {
+        return buildHtml(data);
+    }
+    const participantData: TabletopExerciseData = {
+        ...data,
+        facilitatorGuide: undefined as unknown as TabletopExerciseData['facilitatorGuide'],
+        injects: data.injects.map(inject => ({
+            ...inject,
+            expectedResponse: '',
+            conditionalResponses: undefined,
+            discussionQuestions: undefined,
+        })),
+        gaps: [],
+        gapStats: { critical: 0, high: 0, medium: 0, low: 0 },
+    };
+    return buildHtml(participantData);
+}
+
 export { generatePDF, type TabletopExerciseData };

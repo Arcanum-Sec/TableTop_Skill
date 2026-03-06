@@ -7,10 +7,15 @@
   "scripts": {
     "generate": "bun run generate-pdf.ts",
     "example": "bun run generate-pdf.ts --example --output example-tabletop.pdf",
-    "install-deps": "bun add playwright && bunx playwright install chromium"
+    "install-deps": "bun add playwright && bunx playwright install chromium",
+    "mcp": "bun run mcp-server.ts",
+    "test": "bun run test-mcp.ts"
   },
   "dependencies": {
-    "playwright": "^1.40.0"
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "playwright": "^1.40.0",
+    "zod": "^3.22.0",
+    "zod-to-json-schema": "^3.25.1"
   },
   "devDependencies": {
     "@types/node": "^20.10.0"
