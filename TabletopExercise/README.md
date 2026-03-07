@@ -1,12 +1,14 @@
-# TabletopExercise Skill
+# TabletopExercise
 
 **Comprehensive cybersecurity tabletop exercise design and facilitation framework**
+
+TabletopExercise is both a **PAI skill** and an **MCP server**. As a PAI skill it guides an AI agent through designing, facilitating, and evaluating exercises interactively. As an MCP server it exposes 7 schema-validated tools that any AI coding agent (Claude Code, Gemini CLI, Codex CLI, Mistral Vibe) can call programmatically to generate, validate, and enrich exercise materials.
 
 ---
 
 ## Overview
 
-Enhanced from the original SOC Manager Table Top Designer, this PAI skill provides a complete methodology for designing, facilitating, and evaluating cybersecurity tabletop exercises for both technical and executive audiences.
+Enhanced from the original SOC Manager Table Top Designer, this framework provides a complete methodology for designing, facilitating, and evaluating cybersecurity tabletop exercises for both technical and executive audiences.
 
 **Key Enhancements:**
 - ✅ **Technical Atomics**: Executable inject sequences for realistic scenario delivery
