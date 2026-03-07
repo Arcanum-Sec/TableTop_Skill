@@ -27,6 +27,18 @@ interface TabletopExerciseData {
     date: string;
     version: string;
 
+    // Image generation
+    cover_image_data?: string;
+    artifacts?: Array<{
+        id: string;
+        type: string;
+        title: string;
+        content?: string;
+        image_data?: string;
+        html_data?: string;
+        image_subtype?: string;
+    }>;
+
     // Executive Summary
     executiveSummary: string;
     attackVector: string;
@@ -1006,12 +1018,14 @@ function buildHtml(data: TabletopExerciseData): string {
     <!-- Cover Page -->
     <section class="cover-page">
         <div class="cover-header">
-            <div class="company-logo">
+            ${data.cover_image_data
+              ? `<img src="${data.cover_image_data}" alt="Cover art" style="max-height:180pt;max-width:100%;object-fit:cover;border-radius:8pt;margin-bottom:20pt;" />`
+              : `<div class="company-logo">
                 <svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <rect width="60" height="60" rx="12" fill="white" fill-opacity="0.2"/>
                     <path d="M20 30L27 37L40 23" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-            </div>
+            </div>`}
         </div>
 
         <div class="cover-content">
@@ -1516,6 +1530,26 @@ function buildHtml(data: TabletopExerciseData): string {
         </div>
     </section>
 
+    ${(data.artifacts ?? []).some(a => a.html_data || a.image_data) ? `
+    <section class="content-section" id="artifact-images">
+        <div class="section-header">
+            <h2>Artifact Images</h2>
+        </div>
+        <div class="section-content">
+            ${(data.artifacts ?? []).filter(a => a.html_data || a.image_data).map(a => `
+            <div class="artifact-image-block" style="margin-bottom:2em;page-break-inside:avoid;">
+                <h4>${escapeHtml(a.title)}</h4>
+                ${a.html_data
+                  ? `<div class="artifact-html-embed" style="border:1px solid #e2e8f0;border-radius:6pt;overflow:hidden;">${a.html_data}</div>`
+                  : `<img src="${a.image_data}" alt="${escapeHtml(a.title)}" style="max-width:100%;border-radius:6pt;border:1px solid #e2e8f0;" />`
+                }
+                ${a.content ? `<p style="margin-top:0.5em;font-size:9pt;color:#64748b;font-style:italic;">${escapeHtml(a.content)}</p>` : ''}
+            </div>
+            `).join('')}
+        </div>
+    </section>
+    ` : ''}
+
     <!-- Footer on every page -->
     <div class="page-footer">
         <div class="footer-left">${escapeHtml(data.title)}</div>
@@ -1789,6 +1823,37 @@ if (import.meta.main) {
         console.error('❌ Error generating PDF:', error);
         process.exit(1);
     });
+}
+
+/**
+ * Generate a complete HTML document from exercise data.
+ *
+ * mode='facilitator' — full document including facilitator notes,
+ *   expected responses, conditional responses, and gap analysis.
+ * mode='participant' — spoilers stripped: no expectedResponse,
+ *   no conditionalResponses, no discussionQuestions, no gap analysis,
+ *   no facilitatorGuide.
+ */
+export function generateTabletopHTML(
+    data: TabletopExerciseData,
+    mode: 'facilitator' | 'participant'
+): string {
+    if (mode === 'facilitator') {
+        return buildHtml(data);
+    }
+    const participantData: TabletopExerciseData = {
+        ...data,
+        facilitatorGuide: undefined as unknown as TabletopExerciseData['facilitatorGuide'],
+        injects: data.injects.map(inject => ({
+            ...inject,
+            expectedResponse: '',
+            conditionalResponses: undefined,
+            discussionQuestions: undefined,
+        })),
+        gaps: [],
+        gapStats: { critical: 0, high: 0, medium: 0, low: 0 },
+    };
+    return buildHtml(participantData);
 }
 
 export { generatePDF, type TabletopExerciseData };

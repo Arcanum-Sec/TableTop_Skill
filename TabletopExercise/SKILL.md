@@ -1349,6 +1349,60 @@ bun run generate-pdf.ts \
 
 ---
 
+## Image Generation
+
+TabletopExercise can generate AI images for three pedagogically distinct purposes. Use the MCP tools or invoke them in sequence during exercise creation.
+
+### Three image categories
+
+| Category | MCP Tool | What it generates | Difficulty guidance |
+|----------|----------|-------------------|---------------------|
+| **Attack vector** | `generate_attack_vector_images` | What the victim saw: phishing emails, ransomware notes, fake invoices, USB devices | All levels (phishing/invoice), Intermediate+ (ransomware note) |
+| **Evidence** | `generate_evidence_images` | What investigators find: SIEM logs, network diagrams, dark web listings, SCADA interfaces | All (network diagram), Advanced (SCADA, packet captures) |
+| **Atmosphere** | `generate_atmosphere_images` | World-building: cover art, NPC portraits, location illustrations, period photographs | All (portraits, cover), Historical only (period_photograph) |
+
+### Recommended workflow
+
+```
+validate_exercise_data
+  → generate_attack_vector_images   # populates artifact.image_data
+  → generate_evidence_images        # populates artifact.image_data
+  → generate_atmosphere_images      # populates cover_image_data + NPC portraits
+  → generate_exercise               # facilitator.html contains <img> tags
+  → generate_exercise_qmd           # handout PNGs written to output_dir
+```
+
+### Provider selection
+
+Set `IMAGE_PROVIDER` env var (default: `openai`). Set the corresponding API key.
+
+| Provider | Env var | Notes |
+|----------|---------|-------|
+| `openai` | `OPENAI_API_KEY` | DALL-E 3 -- best prompt adherence |
+| `gemini` | `GEMINI_API_KEY` | Google Imagen (imagen-3.0-generate-002) |
+| `stability` | `STABILITY_API_KEY` | Stability AI REST API |
+| `replicate` | `REPLICATE_API_KEY` | Default model: flux-schnell. Override with `REPLICATE_MODEL` |
+| `ollama` | none | Self-hosted at `OLLAMA_BASE_URL` (default: http://localhost:11434) |
+
+### Style consistency via `visual_style`
+
+Add a `visual_style` block to exercise data to ensure cohesive images within a scenario. Reuse the same block across all scenario cards in a malmon family for a unified visual identity across the handbook.
+
+```json
+{
+  "visual_style": {
+    "art_style": "photorealistic",
+    "color_palette": "high-contrast blue-grey",
+    "mood": "tense, clinical",
+    "seed": 42
+  }
+}
+```
+
+Pass `visual_style` directly to any image tool to override the data-level setting for that call.
+
+---
+
 **Version**: 2.0 (Enhanced from original SOC Manager Table Top Designer)
 **Enhancements**:
 - Added technical atomics generation for exercise runners

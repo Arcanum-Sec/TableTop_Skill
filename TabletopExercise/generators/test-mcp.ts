@@ -1,0 +1,858 @@
+#!/usr/bin/env bun
+/**
+ * Integration tests for the TabletopExercise MCP server.
+ *
+ * Uses InMemoryTransport so tests run in-process without spawning a subprocess.
+ *
+ * Run:
+ *   bun run test-mcp.ts
+ */
+
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { writeFile, unlink, mkdir } from 'fs/promises';
+import { join, resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+import { createServer } from './mcp-server.ts';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// ---------------------------------------------------------------------------
+// Test harness
+// ---------------------------------------------------------------------------
+
+let passed = 0;
+let failed = 0;
+
+function assert(condition: boolean, label: string): void {
+  if (condition) {
+    console.log(`  ✓ ${label}`);
+    passed++;
+  } else {
+    console.error(`  ✗ ${label}`);
+    failed++;
+  }
+}
+
+function parseToolResult(result: Awaited<ReturnType<Client['callTool']>>): unknown {
+  const text = (result.content as Array<{ type: string; text: string }>)[0]?.text ?? '{}';
+  return JSON.parse(text);
+}
+
+// ---------------------------------------------------------------------------
+// Start server + client via InMemoryTransport
+// ---------------------------------------------------------------------------
+
+const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+const server = createServer();
+const client = new Client({ name: 'test-client', version: '1.0.0' });
+
+await server.connect(serverTransport);
+await client.connect(clientTransport);
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const SSRF_DATA_PATH = resolve(__dirname, 'ssrf-exercise-data.json');
+const TMP_DIR = resolve(__dirname);
+
+// Minimal QMD with inject timeline and gap analysis sections
+const QMD_WITH_SECTIONS = `---
+title: Test Scenario
+type: contemporary
+---
+
+## Injects
+
+**T+0**: Initial alert fires.
+
+## Gap Analysis
+
+| Gap | Severity |
+|-----|----------|
+| No runbook | High |
+
+## Facilitator Notes
+
+Keep participants on track.
+`;
+
+// Minimal QMD missing most sections
+const QMD_SPARSE = `---
+title: Sparse Scenario
+---
+
+# Overview
+Short scenario with no enrichment.
+`;
+
+// Historical QMD
+const QMD_HISTORICAL = `---
+title: Historical Scenario
+type: historical
+---
+
+## Injects
+
+T+0 something happens.
+`;
+
+const QMD_CONTEMPORARY_PATH = resolve(__dirname, '/tmp/test-contemporary.qmd');
+const QMD_SPARSE_PATH = resolve(__dirname, '/tmp/test-sparse.qmd');
+const QMD_HISTORICAL_PATH = resolve(__dirname, '/tmp/test-historical.qmd');
+
+await writeFile(QMD_CONTEMPORARY_PATH, QMD_WITH_SECTIONS, 'utf-8');
+await writeFile(QMD_SPARSE_PATH, QMD_SPARSE, 'utf-8');
+await writeFile(QMD_HISTORICAL_PATH, QMD_HISTORICAL, 'utf-8');
+
+// ---------------------------------------------------------------------------
+// Test 1: tools/list — all 6 tools registered
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 1: tools/list');
+{
+  const toolList = await client.listTools();
+  const names = toolList.tools.map(t => t.name).sort();
+  const expected = [
+    'check_scenario_completeness',
+    'generate_atmosphere_images',
+    'generate_attack_vector_images',
+    'generate_evidence_images',
+    'generate_exercise',
+    'generate_exercise_qmd',
+    'list_scenario_cards',
+    'merge_exercise_data',
+    'validate_exercise_data',
+    'validate_m_and_m_formatting',
+  ];
+  assert(JSON.stringify(names) === JSON.stringify(expected), `10 tools registered: ${names.join(', ')}`);
+}
+
+// ---------------------------------------------------------------------------
+// Test 2: resources/list — 3 resources registered
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 2: resources/list');
+{
+  const resList = await client.listResources();
+  const uris = resList.resources.map(r => r.uri).sort();
+  assert(uris.includes('tabletop://schema'), 'tabletop://schema registered');
+  assert(uris.includes('tabletop://atomics'), 'tabletop://atomics registered');
+  assert(uris.includes('tabletop://template'), 'tabletop://template registered');
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: tabletop://schema resource — valid JSON Schema with properties
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 3: tabletop://schema resource');
+{
+  const res = await client.readResource({ uri: 'tabletop://schema' });
+  const text = (res.contents[0] as { text: string }).text;
+  const schema = JSON.parse(text);
+  const props = schema.definitions?.TabletopExerciseData?.properties ?? schema.properties ?? {};
+  assert('title' in props, 'schema has "title" property');
+  assert('injects' in props, 'schema has "injects" property');
+  assert('scenario_type' in props, 'schema has M&M "scenario_type" property');
+  assert('npcDialogue' in props, 'schema has M&M "npcDialogue" property');
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: validate_exercise_data — SSRF example returns valid: true
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 4: validate_exercise_data (valid data)');
+{
+  const ssrfData = JSON.parse(await Bun.file(SSRF_DATA_PATH).text());
+  const result = parseToolResult(
+    await client.callTool({ name: 'validate_exercise_data', arguments: { data: ssrfData } })
+  ) as { valid: boolean; errors: unknown[] };
+  assert(result.valid === true, 'SSRF exercise-data.json passes schema validation');
+  assert(result.errors.length === 0, 'No validation errors');
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: validate_exercise_data — invalid data returns structured errors
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 5: validate_exercise_data (invalid data)');
+{
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'validate_exercise_data',
+      arguments: { data: { title: 'Missing required fields' } },
+    })
+  ) as { valid: boolean; errors: Array<{ path: string; message: string }> };
+  assert(result.valid === false, 'Invalid data returns valid: false');
+  assert(result.errors.length > 0, 'Returns at least one error');
+  const paths = result.errors.map(e => e.path);
+  assert(paths.includes('severity'), 'Reports missing "severity"');
+  assert(paths.includes('injects'), 'Reports missing "injects"');
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: check_scenario_completeness — rich QMD detects present sections
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 6: check_scenario_completeness (rich QMD)');
+{
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'check_scenario_completeness',
+      arguments: { qmd_path: QMD_CONTEMPORARY_PATH },
+    })
+  ) as { present: string[]; missing: string[]; scenario_type: string };
+  assert(result.scenario_type === 'contemporary', 'Detects contemporary from frontmatter');
+  assert(result.present.includes('inject_timeline'), 'Detects inject_timeline section');
+  assert(result.present.includes('gap_analysis'), 'Detects gap_analysis section');
+  assert(result.present.includes('facilitator_notes'), 'Detects facilitator_notes section');
+  assert(result.missing.includes('npc_dialogue'), 'Reports missing npc_dialogue');
+  assert(result.missing.includes('artifacts'), 'Reports missing artifacts');
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: check_scenario_completeness — historical QMD
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 7: check_scenario_completeness (historical QMD)');
+{
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'check_scenario_completeness',
+      arguments: { qmd_path: QMD_HISTORICAL_PATH },
+    })
+  ) as { present: string[]; missing: string[]; scenario_type: string };
+  assert(result.scenario_type === 'historical', 'Detects historical from frontmatter type field');
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: check_scenario_completeness — path traversal rejected
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 8: check_scenario_completeness (path traversal)');
+{
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'check_scenario_completeness',
+      arguments: { qmd_path: '/tmp/../../etc/passwd' },
+    })
+  ) as { error?: string };
+  assert(typeof result.error === 'string' && result.error.includes('traversal'), 'Rejects path with ".."');
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: merge_exercise_data — additive-only merge
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 9: merge_exercise_data (additive-only)');
+{
+  // Write a minimal valid base JSON
+  const basePath = '/tmp/test-exercise-base.json';
+  const base = {
+    title: 'Merge Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{ id: 'INJ-001', time: 'T+0', title: 'Alert fires', severity: 'high', scenario: 'An alert fires.', expectedResponse: 'Investigate' }],
+    gaps: [],
+  };
+  await writeFile(basePath, JSON.stringify(base), 'utf-8');
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'merge_exercise_data',
+      arguments: {
+        base_path: basePath,
+        additions: {
+          title: 'SHOULD NOT OVERWRITE',       // existing key — must be ignored
+          scenario_type: 'contemporary',        // new key — must be added
+          npcDialogue: [],                      // new key — must be added
+        },
+      },
+    })
+  ) as { merged_path?: string; sections_added?: string[]; error?: string };
+
+  assert(!result.error, `No merge error: ${result.error ?? ''}`);
+  assert(Array.isArray(result.sections_added), 'Returns sections_added array');
+  assert(result.sections_added!.includes('scenario_type'), 'Added scenario_type');
+  assert(result.sections_added!.includes('npcDialogue'), 'Added npcDialogue');
+  assert(!result.sections_added!.includes('title'), 'Did NOT overwrite existing title');
+
+  // Verify the file on disk
+  const merged = JSON.parse(await Bun.file(basePath).text());
+  assert(merged.title === 'Merge Test', 'Original title preserved in file');
+  assert(merged.scenario_type === 'contemporary', 'New field written to file');
+
+  await unlink(basePath).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: validate_m_and_m_formatting — contemporary violation (real org name)
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 10: validate_m_and_m_formatting (contemporary violation)');
+{
+  const data = {
+    title: 'Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{ id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high', scenario: 'Alert fires.', expectedResponse: '' }],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001',
+      type: 'document',
+      title: 'Vendor invoice',
+      content: 'Invoice from Microsoft Corporation for Azure services.',
+    }],
+  };
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'validate_m_and_m_formatting',
+      arguments: { data, scenario_type: 'contemporary' },
+    })
+  ) as { valid: boolean; violations: Array<{ rule: string }> };
+  assert(result.valid === false, 'Detects real-org violation in contemporary artifact');
+  assert(
+    result.violations.some(v => v.rule === 'contemporary_fictional_orgs_only'),
+    'Reports contemporary_fictional_orgs_only rule violation'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: validate_m_and_m_formatting — historical missing scenario_type field
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 11: validate_m_and_m_formatting (historical missing field)');
+{
+  const data = {
+    title: 'Historical exercise',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    // scenario_type intentionally omitted
+    injects: [],
+    gaps: [],
+  };
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'validate_m_and_m_formatting',
+      arguments: { data, scenario_type: 'historical' },
+    })
+  ) as { valid: boolean; violations: Array<{ rule: string }> };
+  assert(result.valid === false, 'Detects missing scenario_type field for historical');
+  assert(
+    result.violations.some(v => v.rule === 'historical_type_field_required'),
+    'Reports historical_type_field_required violation'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: generate_exercise — produces facilitator.html and participant.html
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 12: generate_exercise');
+{
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise',
+      arguments: {
+        exercise_data_path: SSRF_DATA_PATH,
+        output_dir: TMP_DIR,
+      },
+    })
+  ) as { facilitator_html?: string; participant_html?: string; error?: string };
+
+  assert(!result.error, `No generation error: ${result.error ?? ''}`);
+  assert(typeof result.facilitator_html === 'string', 'Returns facilitator_html path');
+  assert(typeof result.participant_html === 'string', 'Returns participant_html path');
+
+  if (result.facilitator_html && result.participant_html) {
+    const facilContent = await Bun.file(result.facilitator_html).text().catch(() => '');
+    const partContent = await Bun.file(result.participant_html).text().catch(() => '');
+    assert(facilContent.includes('<!DOCTYPE html'), 'facilitator.html is valid HTML');
+    assert(partContent.includes('<!DOCTYPE html'), 'participant.html is valid HTML');
+    assert(facilContent.length > partContent.length, 'facilitator.html is larger (has facilitator-only content)');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: generate_exercise_qmd — basic QMD generation
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 13: generate_exercise_qmd (basic generation)');
+{
+  const tmpIndexPath = '/tmp/test-index-basic.qmd';
+  const tmpQmdDir = '/tmp/test-qmd-basic';
+  await mkdir(tmpQmdDir, { recursive: true });
+
+  const exerciseData = {
+    title: 'QMD Test Exercise',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert fires',
+      severity: 'high', scenario: 'An alert fires on the monitoring dashboard.',
+      expectedResponse: 'Investigate the alert.',
+    }],
+    gaps: [{
+      priority: 'high', title: 'No incident runbook',
+      what_the_scenario_revealed: 'Responders had no documented runbook.',
+      why_it_matters: 'Increases mean time to respond.',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: tmpQmdDir, append_to: tmpIndexPath },
+    })
+  ) as { appended_to?: string; sections_written?: string[]; error?: string };
+
+  assert(!result.error, `No QMD generation error: ${result.error ?? ''}`);
+  assert(result.appended_to === tmpIndexPath, 'Returns correct appended_to path');
+  assert(Array.isArray(result.sections_written), 'Returns sections_written array');
+  assert(result.sections_written!.includes('Inject Sequence'), 'Wrote Inject Sequence section');
+  assert(result.sections_written!.includes('Post-Session Gap Analysis'), 'Wrote Gap Analysis section');
+
+  const indexContent = await Bun.file(tmpIndexPath).text().catch(() => '');
+  assert(indexContent.includes('## Inject Sequence'), 'index.qmd contains Inject Sequence heading');
+  assert(indexContent.includes('## Post-Session Gap Analysis'), 'index.qmd contains Gap Analysis heading');
+  assert(indexContent.includes('Alert fires'), 'index.qmd contains inject title');
+
+  const dataJson = await Bun.file(join(tmpQmdDir, 'exercise-data.json')).text().catch(() => '');
+  assert(dataJson.includes('QMD Test Exercise'), 'exercise-data.json written to output_dir');
+
+  await unlink(tmpIndexPath).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: generate_exercise_qmd — handout generation
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 14: generate_exercise_qmd (handout generation)');
+{
+  const tmpIndexPath = '/tmp/test-index-handout.qmd';
+  const tmpQmdDir = '/tmp/test-qmd-handout';
+  await mkdir(tmpQmdDir, { recursive: true });
+
+  const exerciseData = {
+    title: 'Handout Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high',
+      scenario: 'Alert fires.', expectedResponse: 'Investigate.',
+    }],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001', type: 'log', title: 'SCADA Diagnostics',
+      handout_letter: 'A', filename: 'scada-diagnostics.qmd',
+      artifact_content: 'Device 192.0.2.10 reported error code 0x4F.',
+      im_notes_bullets: ['This log is intentionally truncated.'],
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: tmpQmdDir, append_to: tmpIndexPath },
+    })
+  ) as { handout_a_path?: string; handout_b_path?: string; error?: string };
+
+  assert(!result.error, `No handout generation error: ${result.error ?? ''}`);
+  assert(typeof result.handout_a_path === 'string', 'Returns handout_a_path');
+  assert(!result.handout_b_path, 'No handout_b_path when only one artifact');
+
+  if (result.handout_a_path) {
+    const handoutContent = await Bun.file(result.handout_a_path).text().catch(() => '');
+    assert(handoutContent.includes('Handout A'), 'handout-a contains "Handout A"');
+    assert(handoutContent.includes('SCADA Diagnostics'), 'handout-a contains artifact title');
+    assert(handoutContent.includes('192.0.2.10'), 'handout-a contains TEST-NET IP (allowed)');
+    assert(handoutContent.includes('im-notes'), 'handout-a contains IM notes div');
+  }
+
+  await unlink(tmpIndexPath).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: generate_exercise_qmd — em dash guard
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 15: generate_exercise_qmd (em dash guard)');
+{
+  const exerciseData = {
+    title: 'Em Dash Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high',
+      scenario: 'A critical alert\u2014investigate immediately.',  // em dash
+      expectedResponse: 'Investigate.',
+    }],
+    gaps: [],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: '/tmp', append_to: '/tmp/test-em-dash.qmd' },
+    })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns error for em dash in content');
+  assert(
+    result.error!.toLowerCase().includes('em dash') || result.error!.includes('\u2014'),
+    'Error mentions em dash'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: generate_exercise_qmd — contemporary read_aloud names malmon family
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 16: generate_exercise_qmd (contemporary read_aloud violation)');
+{
+  const exerciseData = {
+    title: 'Contemporary Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    scenario_type: 'contemporary',
+    scenario: { malmon_family: 'LockBit' },
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high',
+      scenario: 'LockBit ransomware has encrypted your files.',  // names malmon family
+      expectedResponse: 'Isolate affected systems.',
+    }],
+    gaps: [],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: '/tmp', append_to: '/tmp/test-malmon.qmd' },
+    })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns error when malmon named in contemporary read_aloud');
+  assert(result.error!.includes('LockBit'), 'Error mentions the malmon family name');
+}
+
+// ---------------------------------------------------------------------------
+// Test 17: generate_exercise_qmd — real IP in artifact_content rejected
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 17: generate_exercise_qmd (real IP in artifact_content)');
+{
+  const exerciseData = {
+    title: 'IP Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [{
+      id: 'INJ-001', time: 'T+0', title: 'Alert', severity: 'high',
+      scenario: 'Alert fires.', expectedResponse: 'Investigate.',
+    }],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001', type: 'log', title: 'Server log',
+      handout_letter: 'A',
+      artifact_content: 'Connection from 1.2.3.4 detected.',  // real routable IP
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: { exercise_data: exerciseData, output_dir: '/tmp', append_to: '/tmp/test-ip.qmd' },
+    })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns error for real routable IP in artifact_content');
+  assert(
+    result.error!.includes('1.2.3.4') || result.error!.toLowerCase().includes('ip'),
+    'Error identifies the offending IP'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: generate_exercise_qmd — path traversal rejected
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 18: generate_exercise_qmd (path traversal)');
+{
+  const exerciseData = {
+    title: 'Traversal Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_exercise_qmd',
+      arguments: {
+        exercise_data: exerciseData,
+        output_dir: '/tmp/../../etc',
+        append_to: '/tmp/test.qmd',
+      },
+    })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns error for path traversal in output_dir');
+  assert(result.error!.toLowerCase().includes('traversal'), 'Error mentions path traversal');
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: generate_attack_vector_images — error when no API key set
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 19: generate_attack_vector_images (no API key → structured error)');
+{
+  const savedKey = process.env.OPENAI_API_KEY;
+  const savedProvider = process.env.IMAGE_PROVIDER;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.IMAGE_PROVIDER;
+
+  const exerciseData = {
+    title: 'Attack Vector Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      // usb_device is a physical subtype — routes to AI provider, not HTML template
+      id: 'ART-001', type: 'other', title: 'Suspicious USB Drive',
+      image_subtype: 'usb_device',
+      artifact_content: 'USB found at reception desk, labelled "Q4 Payroll"',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_attack_vector_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string; updated_data?: unknown; images_generated?: number };
+
+  assert(typeof result.error === 'string', 'Returns structured error when no API key');
+  assert(result.error!.toLowerCase().includes('api_key') || result.error!.toLowerCase().includes('api key') || result.error!.toLowerCase().includes('not set'), 'Error mentions missing API key');
+
+  if (savedKey) process.env.OPENAI_API_KEY = savedKey;
+  if (savedProvider) process.env.IMAGE_PROVIDER = savedProvider;
+}
+
+// ---------------------------------------------------------------------------
+// Test 20: generate_evidence_images — error when no API key set
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 20: generate_evidence_images (no API key → structured error)');
+{
+  const savedKey = process.env.OPENAI_API_KEY;
+  const savedProvider = process.env.IMAGE_PROVIDER;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.IMAGE_PROVIDER;
+
+  const exerciseData = {
+    title: 'Evidence Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      // network_diagram is a physical subtype — routes to AI provider, not HTML template
+      id: 'ART-001', type: 'other', title: 'Network Topology',
+      image_subtype: 'network_diagram',
+      artifact_content: 'Corporate network showing compromised DMZ segment',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_evidence_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns structured error when no API key');
+  assert(result.error!.toLowerCase().includes('api_key') || result.error!.toLowerCase().includes('api key') || result.error!.toLowerCase().includes('not set'), 'Error mentions missing API key');
+
+  if (savedKey) process.env.OPENAI_API_KEY = savedKey;
+  if (savedProvider) process.env.IMAGE_PROVIDER = savedProvider;
+}
+
+// ---------------------------------------------------------------------------
+// Test 21: generate_atmosphere_images — error when no API key set
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 21: generate_atmosphere_images (no API key → structured error)');
+{
+  const savedKey = process.env.OPENAI_API_KEY;
+  const savedProvider = process.env.IMAGE_PROVIDER;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.IMAGE_PROVIDER;
+
+  const exerciseData = {
+    title: 'Atmosphere Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    npcDialogue: [{
+      npcName: 'Alex Chen',
+      role: 'IT Manager',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_atmosphere_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns structured error when no API key');
+  assert(result.error!.toLowerCase().includes('api_key') || result.error!.toLowerCase().includes('api key') || result.error!.toLowerCase().includes('not set'), 'Error mentions missing API key');
+
+  if (savedKey) process.env.OPENAI_API_KEY = savedKey;
+  if (savedProvider) process.env.IMAGE_PROVIDER = savedProvider;
+}
+
+// ---------------------------------------------------------------------------
+// Test 22: generate_attack_vector_images — invalid exercise_data → schema error
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 22: generate_attack_vector_images (invalid data → schema error before provider check)');
+{
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_attack_vector_images',
+      arguments: { exercise_data: { title: 'Missing required fields' } },
+    })
+  ) as { error?: string; errors?: unknown[] };
+
+  assert(typeof result.error === 'string', 'Returns error for invalid schema');
+  assert(result.error!.toLowerCase().includes('schema') || result.error!.toLowerCase().includes('valid'), 'Error mentions schema validation');
+}
+
+// ---------------------------------------------------------------------------
+// Test 23: visual_style round-trips through validate_exercise_data
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 23: visual_style round-trips through schema validation');
+{
+  const exerciseData = {
+    title: 'Style Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    visual_style: {
+      art_style: 'photorealistic',
+      color_palette: 'high-contrast blue-grey',
+      mood: 'tense, clinical',
+      seed: 42,
+    },
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'validate_exercise_data', arguments: { data: exerciseData } })
+  ) as { valid: boolean; errors: unknown[] };
+
+  assert(result.valid === true, 'visual_style passes schema validation');
+  assert(result.errors.length === 0, 'No validation errors for visual_style');
+}
+
+// ---------------------------------------------------------------------------
+// Test 24: image_subtype accepted and returned via validate_exercise_data
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 24: image_subtype accepted in ArtifactSchema');
+{
+  const exerciseData = {
+    title: 'Image Subtype Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001',
+      type: 'screenshot',
+      title: 'Ransomware Note',
+      image_subtype: 'ransomware_note',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'validate_exercise_data', arguments: { data: exerciseData } })
+  ) as { valid: boolean; errors: unknown[] };
+
+  assert(result.valid === true, 'image_subtype "ransomware_note" passes schema validation');
+  assert(result.errors.length === 0, 'No validation errors for image_subtype');
+}
+
+// ---------------------------------------------------------------------------
+// Test 25: generate_attack_vector_images — email type yields html_data (no API key needed)
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 25: generate_attack_vector_images (email → html_data, no API key required)');
+{
+  const exerciseData = {
+    title: 'HTML Template Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001',
+      type: 'email',
+      title: 'Urgent: Verify Your Account',
+      artifact_content: 'Dear User, your account will be suspended unless you verify immediately.',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_attack_vector_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string; updated_data?: { artifacts?: Array<{ html_data?: string; image_data?: string }> }; images_generated?: number };
+
+  assert(!result.error, 'No error for email type (HTML template path, no API key needed)');
+  const artifact = result.updated_data?.artifacts?.[0];
+  assert(typeof artifact?.html_data === 'string' && (artifact.html_data.includes('<html') || artifact.html_data.includes('<div')), 'html_data is a string containing HTML');
+  assert(artifact?.image_data === undefined, 'image_data is undefined for UI subtype');
+  assert(result.images_generated === 1, 'images_generated is 1');
+}
+
+// ---------------------------------------------------------------------------
+// Test 26: generate_evidence_images — log type yields html_data (no API key needed)
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 26: generate_evidence_images (log → html_data, no API key required)');
+{
+  const exerciseData = {
+    title: 'HTML Template Evidence Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-002',
+      type: 'log',
+      title: 'Suspicious Outbound Traffic',
+      artifact_content: 'ALERT: outbound connection to 203.0.113.42:443\nDNS query: evil.example.com',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_evidence_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string; updated_data?: { artifacts?: Array<{ html_data?: string; image_data?: string }> }; images_generated?: number };
+
+  assert(!result.error, 'No error for log type (HTML template path, no API key needed)');
+  const artifact = result.updated_data?.artifacts?.[0];
+  assert(typeof artifact?.html_data === 'string' && (artifact.html_data.includes('<html') || artifact.html_data.includes('<div')), 'html_data is a string containing HTML');
+  assert(artifact?.image_data === undefined, 'image_data is undefined for UI subtype');
+  assert(result.images_generated === 1, 'images_generated is 1');
+}
+
+// ---------------------------------------------------------------------------
+// Summary
+// ---------------------------------------------------------------------------
+
+await client.close();
+
+console.log(`\n${'─'.repeat(50)}`);
+console.log(`Results: ${passed} passed, ${failed} failed`);
+
+if (failed > 0) {
+  process.exit(1);
+}

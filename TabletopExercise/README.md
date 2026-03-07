@@ -1,12 +1,14 @@
-# TabletopExercise Skill
+# TabletopExercise
 
 **Comprehensive cybersecurity tabletop exercise design and facilitation framework**
+
+TabletopExercise is both a **PAI skill** and an **MCP server**. As a PAI skill it guides an AI agent through designing, facilitating, and evaluating exercises interactively. As an MCP server it exposes 10 schema-validated tools that any AI coding agent (Claude Code, Gemini CLI, Codex CLI, Mistral Vibe) can call programmatically to generate, validate, and enrich exercise materials — including AI-generated images for attack vectors, evidence, and atmosphere.
 
 ---
 
 ## Overview
 
-Enhanced from the original SOC Manager Table Top Designer, this PAI skill provides a complete methodology for designing, facilitating, and evaluating cybersecurity tabletop exercises for both technical and executive audiences.
+Enhanced from the original SOC Manager Table Top Designer, this framework provides a complete methodology for designing, facilitating, and evaluating cybersecurity tabletop exercises for both technical and executive audiences.
 
 **Key Enhancements:**
 - ✅ **Technical Atomics**: Executable inject sequences for realistic scenario delivery
@@ -84,13 +86,172 @@ Goal: Identify gaps and improve processes
 
 ---
 
+## MCP Server
+
+The TabletopExercise skill also ships as an **MCP (Model Context Protocol) server**, allowing any AI coding agent to call it programmatically to enrich scenario cards in a schema-validated, additive-only way.
+
+### Setup
+
+Replace `/path/to/TabletopExercise/generators/mcp-server.ts` with the absolute path on your machine.
+
+#### Claude Code (CLI)
+
+```bash
+claude mcp add tabletop-exercise -- bun run /path/to/TabletopExercise/generators/mcp-server.ts
+```
+
+#### Gemini CLI
+
+Add to `~/.gemini/settings.json` (global) or `.gemini/settings.json` (project):
+
+```json
+{
+  "mcpServers": {
+    "tabletop-exercise": {
+      "command": "bun",
+      "args": ["run", "/path/to/TabletopExercise/generators/mcp-server.ts"]
+    }
+  }
+}
+```
+
+#### OpenAI Codex CLI
+
+Via CLI:
+
+```bash
+codex mcp add tabletop-exercise -- bun run /path/to/TabletopExercise/generators/mcp-server.ts
+```
+
+Or add to `~/.codex/config.toml` (global) or `.codex/config.toml` (project):
+
+```toml
+[mcp_servers.tabletop-exercise]
+command = "bun"
+args = ["run", "/path/to/TabletopExercise/generators/mcp-server.ts"]
+```
+
+#### Mistral Vibe (CLI)
+
+Add to `~/.vibe/config.toml` (global) or `.vibe/config.toml` (project):
+
+```toml
+[mcp_servers.tabletop-exercise]
+command = "bun"
+args = ["run", "/path/to/TabletopExercise/generators/mcp-server.ts"]
+```
+
+### Tools (10)
+
+| Tool | Description |
+|------|-------------|
+| `check_scenario_completeness` | Parse a `.qmd` scenario card and return which enrichment sections are present/missing |
+| `validate_exercise_data` | Validate an exercise-data object against the Zod schema; returns structured errors |
+| `generate_exercise` | Produce `facilitator.html` + `participant.html` from exercise-data |
+| `merge_exercise_data` | Additive-only merge — never overwrites existing keys in the base JSON |
+| `validate_m_and_m_formatting` | Enforce M&M-specific rules (contemporary vs. historical scenario types) |
+| `generate_exercise_qmd` | Generate native Quarto markdown: 4 sections appended to `index.qmd` + handout QMD files |
+| `list_scenario_cards` | Walk a directory tree and return a completeness summary for every `.qmd` found |
+| `generate_attack_vector_images` | Render attack-vector artifacts — HTML/CSS templates for UI subtypes (phishing, ransomware, invoices), AI images for physical subtypes (USB device) |
+| `generate_evidence_images` | Render evidence artifacts — HTML/CSS templates for UI subtypes (SIEM logs, dark web listings, SCADA), AI images for physical subtypes (network diagrams) |
+| `generate_atmosphere_images` | Generate AI atmosphere images: cover art, NPC portraits, location illustrations |
+
+### Resources (3)
+
+| URI | Content |
+|-----|---------|
+| `tabletop://schema` | Full JSON Schema derived from Zod — describes every field and enrichment section |
+| `tabletop://atomics` | Full content of `ATOMICS-LIBRARY.md` |
+| `tabletop://template` | Annotated template showing how each schema field maps to HTML output |
+
+### `generate_exercise_qmd` output
+
+Given a validated `exercise-data.json`, this tool appends four sections to a Quarto `index.qmd`:
+
+1. **Inject Sequence** — timed injects with read-aloud text, conditional branches, IM notes
+2. **NPC Dialogue Scripts** — verbatim lines with three emotional beats (under pressure / escalating / conceding)
+3. **Red Herrings** — false leads with resolution scripts
+4. **Post-Session Gap Analysis** — debrief-focused gap write-ups with remediation lists
+
+It also writes `handout-a-[slug].qmd` and `handout-b-[slug].qmd` with print-safe CSS, IM-notes divs, and key discovery questions.
+
+**Guards enforced before any file is written:**
+- Em dash (`—`) in generated text → error (use `--` instead)
+- Contemporary scenario `read_aloud` naming the malmon family → error
+- `artifact_content` containing non-TEST-NET IP addresses → error
+- Path traversal (`..`) in any file path argument → rejected
+
+### Image generation
+
+`generate_attack_vector_images` and `generate_evidence_images` use a **two-path routing strategy** based on artifact subtype:
+
+| Path | Subtypes | API key required? |
+|------|----------|-------------------|
+| **HTML/CSS template** | `phishing_email`, `ransomware_note`, `fraudulent_invoice`, `network_capture`, `dark_web_listing`, `scada_interface` | No |
+| **AI provider** | `usb_device`, `network_diagram`, `period_photograph`, `portrait`, `location_illustration`, `cover_art` | Yes |
+
+**Why two paths?** Diffusion models produce fuzzy, unreadable text when rendering UI-heavy artifacts. HTML templates inject `artifact_content` verbatim so text is always accurate and legible at any zoom. Physical and atmospheric artifacts (USB photos, portraits, location art) have no text to render and benefit from AI imagery.
+
+UI-subtype artifacts receive `html_data` (a self-contained HTML string); AI-rendered artifacts receive `image_data` (base64 PNG). Both are rendered in `facilitator.html` — `html_data` as an inline `<div>` embed, `image_data` as an `<img>` tag.
+
+**AI provider setup** (required only for physical/atmosphere subtypes):
+
+```bash
+cp TabletopExercise/generators/.env.example TabletopExercise/generators/.env
+# edit .env — set IMAGE_PROVIDER and the matching API key
+```
+
+Set `IMAGE_PROVIDER` to a single provider or a **comma-separated priority chain** — each is tried in order, first success wins:
+
+```
+IMAGE_PROVIDER=openai              # single provider
+IMAGE_PROVIDER=openai,replicate    # priority chain with fallbacks
+```
+
+If a provider fails (missing key, rate limit, API error), the next one in the chain is tried automatically. `provider_used` in the tool response reports which provider(s) fired.
+
+Supported providers: `openai` (DALL-E 3, default), `gemini` (Imagen 4), `stability`, `replicate` (Flux Schnell), `ollama` (self-hosted).
+
+Recommended workflow:
+```
+validate_exercise_data
+  → generate_attack_vector_images  # html_data set for UI subtypes; image_data for physical
+  → generate_evidence_images       # html_data set for UI subtypes; image_data for diagrams
+  → generate_atmosphere_images     # image_data for all atmosphere subtypes
+  → generate_exercise              # facilitator.html renders both html_data and image_data
+  → generate_exercise_qmd          # handout PNGs written alongside .qmd files
+```
+
+### Running the tests
+
+```bash
+cd TabletopExercise/generators
+bun run test-mcp.ts   # 83 assertions across 26 test groups — all in-process via InMemoryTransport
+```
+
+Tests 19-24 cover AI image generation: no-key error paths (physical subtypes), schema validation before provider check, `visual_style` round-trip, and `image_subtype` acceptance. Tests 25-26 cover the HTML template path (`email` → `html_data`, `log` → `html_data`). No API key required to run the test suite.
+
+---
+
 ## File Structure
 
 ```
-/root/.claude/skills/TabletopExercise/
-├── README.md              # This file - overview and quick start
-├── SKILL.md              # Main skill definition (PAI integration)
-└── ATOMICS-LIBRARY.md    # Pre-built technical inject sequences
+TabletopExercise/
+├── README.md                  # This file
+├── SKILL.md                   # PAI skill definition
+├── ATOMICS-LIBRARY.md         # Pre-built atomic inject sequences
+└── generators/
+    ├── mcp-server.ts          # MCP server (10 tools + 3 resources)
+    ├── schema.ts              # Zod schemas — single source of truth
+    ├── generate-images.ts     # Image generation — routes UI subtypes to HTML templates, physical subtypes to AI
+    ├── generate-html-artifacts.ts  # HTML/CSS templates for UI-heavy artifact subtypes (6 templates)
+    ├── generate-qmd.ts        # Native Quarto markdown generator
+    ├── generate-pdf.ts        # PDF/HTML generator (core rendering logic)
+    ├── generate-html.ts       # Standalone HTML generator
+    ├── generate-both.ts       # Facilitator + participant HTML pair
+    ├── test-mcp.ts            # Integration tests (InMemoryTransport)
+    ├── .env.example           # API key template for image providers
+    └── package.json
 ```
 
 **Generated Outputs** (when skill is invoked):
@@ -103,6 +264,16 @@ Goal: Identify gaps and improve processes
     ├── evaluation-forms.md         # Observer templates
     ├── after-action-report.md      # Post-exercise findings
     └── gap-analysis-checklist.md   # Missing SOPs/playbooks
+```
+
+**MCP server outputs** (when `generate_exercise_qmd` is called):
+```
+[scenario-dir]/
+├── index.qmd                       # 4 sections appended (inject sequence, NPC dialogue, red herrings, gap analysis)
+├── handout-a-[slug].qmd            # Player handout A (print-safe)
+├── handout-a-[slug].png            # AI-generated image (if image_data set on artifact)
+├── handout-b-[slug].qmd            # Player handout B (print-safe, if present)
+└── exercise-data.json              # Validated exercise data (serialized)
 ```
 
 ---
@@ -613,6 +784,32 @@ Skill enhanced with learnings from:
 ---
 
 ## Version History
+
+**v3.2** (2026-03-07) - HTML Artifact Templates
+- Added `generate-html-artifacts.ts` — six self-contained HTML/CSS templates for UI-heavy artifact subtypes: `phishing_email` (macOS Mail client chrome), `ransomware_note` (dark splash screen with BTC address), `fraudulent_invoice` (white paper layout), `network_capture` (Wireshark dark table), `dark_web_listing` (terminal green-on-black), `scada_interface` (industrial HMI with CSS gauges)
+- `generate_attack_vector_images` and `generate_evidence_images` now route UI subtypes to HTML templates (no API key required); physical subtypes still use AI providers
+- UI-subtype artifacts receive `html_data` (self-contained HTML string); AI-rendered artifacts receive `image_data` (base64 PNG); `generate_exercise` renders both inline
+- Added `html_data` field to `ArtifactSchema` in `schema.ts`
+- Tests expanded from 75 to 83 assertions (Tests 25-26 verify HTML template path; Tests 19-20 updated to use physical subtypes for AI fallback coverage)
+
+**v3.1** (2026-03-07) - AI Image Generation
+- Added `generate-images.ts` — provider registry supporting OpenAI (DALL-E 3), Gemini (Imagen 4), Stability AI, Replicate (Flux Schnell), Ollama (self-hosted)
+- `IMAGE_PROVIDER` accepts a comma-separated priority chain (`openai,replicate`) — each provider tried in order, first success wins; `provider_used` in tool response shows which provider(s) fired
+- Added 3 new MCP tools: `generate_attack_vector_images`, `generate_evidence_images`, `generate_atmosphere_images`
+- Added `ImageSubtypeSchema` (12 subtypes) and `VisualStyleSchema` for cross-scenario style consistency
+- `generate_exercise` renders `<img>` tags for artifacts with `image_data`; cover art embedded in cover page
+- `generate_exercise_qmd` writes `[slug].png` alongside handout QMD files when `image_data` is present
+- API keys loaded from `.env` in generators directory; shell environment always takes precedence
+- Tests expanded from 63 to 75 assertions (Tests 19-24 cover image generation error paths and schema)
+
+**v3.0** (2026-03-07) - MCP Server + Quarto Output
+- Added MCP server (`mcp-server.ts`) with 7 tools and 3 resources
+- Added `schema.ts` — Zod v3 schemas as single source of truth for types, validation, and JSON Schema resource
+- Added `generate_exercise_qmd` tool for native Quarto markdown output (inject sequence, NPC dialogue, red herrings, gap analysis, handout QMD files)
+- Added M&M-specific validation: contemporary/historical scenario type rules, malmon family name guards, TEST-NET IP enforcement, em dash guard
+- Added `merge_exercise_data` additive-only merge tool
+- Added 63-assertion integration test suite using `InMemoryTransport` (18 test groups)
+- Verified against M&M scenario cards: handout CSS, `quarto render` clean output, all 13 malmon family names
 
 **v2.0** (2026-02-06) - Enhanced PAI Skill
 - Added technical atomics generation for exercise runners
