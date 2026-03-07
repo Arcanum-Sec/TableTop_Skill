@@ -118,6 +118,9 @@ console.log('\nTest 1: tools/list');
   const names = toolList.tools.map(t => t.name).sort();
   const expected = [
     'check_scenario_completeness',
+    'generate_atmosphere_images',
+    'generate_attack_vector_images',
+    'generate_evidence_images',
     'generate_exercise',
     'generate_exercise_qmd',
     'list_scenario_cards',
@@ -125,7 +128,7 @@ console.log('\nTest 1: tools/list');
     'validate_exercise_data',
     'validate_m_and_m_formatting',
   ];
-  assert(JSON.stringify(names) === JSON.stringify(expected), `7 tools registered: ${names.join(', ')}`);
+  assert(JSON.stringify(names) === JSON.stringify(expected), `10 tools registered: ${names.join(', ')}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +601,247 @@ console.log('\nTest 18: generate_exercise_qmd (path traversal)');
 
   assert(typeof result.error === 'string', 'Returns error for path traversal in output_dir');
   assert(result.error!.toLowerCase().includes('traversal'), 'Error mentions path traversal');
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: generate_attack_vector_images — error when no API key set
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 19: generate_attack_vector_images (no API key → structured error)');
+{
+  const savedKey = process.env.OPENAI_API_KEY;
+  const savedProvider = process.env.IMAGE_PROVIDER;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.IMAGE_PROVIDER;
+
+  const exerciseData = {
+    title: 'Attack Vector Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      // usb_device is a physical subtype — routes to AI provider, not HTML template
+      id: 'ART-001', type: 'other', title: 'Suspicious USB Drive',
+      image_subtype: 'usb_device',
+      artifact_content: 'USB found at reception desk, labelled "Q4 Payroll"',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_attack_vector_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string; updated_data?: unknown; images_generated?: number };
+
+  assert(typeof result.error === 'string', 'Returns structured error when no API key');
+  assert(result.error!.toLowerCase().includes('api_key') || result.error!.toLowerCase().includes('api key') || result.error!.toLowerCase().includes('not set'), 'Error mentions missing API key');
+
+  if (savedKey) process.env.OPENAI_API_KEY = savedKey;
+  if (savedProvider) process.env.IMAGE_PROVIDER = savedProvider;
+}
+
+// ---------------------------------------------------------------------------
+// Test 20: generate_evidence_images — error when no API key set
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 20: generate_evidence_images (no API key → structured error)');
+{
+  const savedKey = process.env.OPENAI_API_KEY;
+  const savedProvider = process.env.IMAGE_PROVIDER;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.IMAGE_PROVIDER;
+
+  const exerciseData = {
+    title: 'Evidence Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      // network_diagram is a physical subtype — routes to AI provider, not HTML template
+      id: 'ART-001', type: 'other', title: 'Network Topology',
+      image_subtype: 'network_diagram',
+      artifact_content: 'Corporate network showing compromised DMZ segment',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_evidence_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns structured error when no API key');
+  assert(result.error!.toLowerCase().includes('api_key') || result.error!.toLowerCase().includes('api key') || result.error!.toLowerCase().includes('not set'), 'Error mentions missing API key');
+
+  if (savedKey) process.env.OPENAI_API_KEY = savedKey;
+  if (savedProvider) process.env.IMAGE_PROVIDER = savedProvider;
+}
+
+// ---------------------------------------------------------------------------
+// Test 21: generate_atmosphere_images — error when no API key set
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 21: generate_atmosphere_images (no API key → structured error)');
+{
+  const savedKey = process.env.OPENAI_API_KEY;
+  const savedProvider = process.env.IMAGE_PROVIDER;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.IMAGE_PROVIDER;
+
+  const exerciseData = {
+    title: 'Atmosphere Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    npcDialogue: [{
+      npcName: 'Alex Chen',
+      role: 'IT Manager',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_atmosphere_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string };
+
+  assert(typeof result.error === 'string', 'Returns structured error when no API key');
+  assert(result.error!.toLowerCase().includes('api_key') || result.error!.toLowerCase().includes('api key') || result.error!.toLowerCase().includes('not set'), 'Error mentions missing API key');
+
+  if (savedKey) process.env.OPENAI_API_KEY = savedKey;
+  if (savedProvider) process.env.IMAGE_PROVIDER = savedProvider;
+}
+
+// ---------------------------------------------------------------------------
+// Test 22: generate_attack_vector_images — invalid exercise_data → schema error
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 22: generate_attack_vector_images (invalid data → schema error before provider check)');
+{
+  const result = parseToolResult(
+    await client.callTool({
+      name: 'generate_attack_vector_images',
+      arguments: { exercise_data: { title: 'Missing required fields' } },
+    })
+  ) as { error?: string; errors?: unknown[] };
+
+  assert(typeof result.error === 'string', 'Returns error for invalid schema');
+  assert(result.error!.toLowerCase().includes('schema') || result.error!.toLowerCase().includes('valid'), 'Error mentions schema validation');
+}
+
+// ---------------------------------------------------------------------------
+// Test 23: visual_style round-trips through validate_exercise_data
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 23: visual_style round-trips through schema validation');
+{
+  const exerciseData = {
+    title: 'Style Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    visual_style: {
+      art_style: 'photorealistic',
+      color_palette: 'high-contrast blue-grey',
+      mood: 'tense, clinical',
+      seed: 42,
+    },
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'validate_exercise_data', arguments: { data: exerciseData } })
+  ) as { valid: boolean; errors: unknown[] };
+
+  assert(result.valid === true, 'visual_style passes schema validation');
+  assert(result.errors.length === 0, 'No validation errors for visual_style');
+}
+
+// ---------------------------------------------------------------------------
+// Test 24: image_subtype accepted and returned via validate_exercise_data
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 24: image_subtype accepted in ArtifactSchema');
+{
+  const exerciseData = {
+    title: 'Image Subtype Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001',
+      type: 'screenshot',
+      title: 'Ransomware Note',
+      image_subtype: 'ransomware_note',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'validate_exercise_data', arguments: { data: exerciseData } })
+  ) as { valid: boolean; errors: unknown[] };
+
+  assert(result.valid === true, 'image_subtype "ransomware_note" passes schema validation');
+  assert(result.errors.length === 0, 'No validation errors for image_subtype');
+}
+
+// ---------------------------------------------------------------------------
+// Test 25: generate_attack_vector_images — email type yields html_data (no API key needed)
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 25: generate_attack_vector_images (email → html_data, no API key required)');
+{
+  const exerciseData = {
+    title: 'HTML Template Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-001',
+      type: 'email',
+      title: 'Urgent: Verify Your Account',
+      artifact_content: 'Dear User, your account will be suspended unless you verify immediately.',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_attack_vector_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string; updated_data?: { artifacts?: Array<{ html_data?: string; image_data?: string }> }; images_generated?: number };
+
+  assert(!result.error, 'No error for email type (HTML template path, no API key needed)');
+  const artifact = result.updated_data?.artifacts?.[0];
+  assert(typeof artifact?.html_data === 'string' && (artifact.html_data.includes('<html') || artifact.html_data.includes('<div')), 'html_data is a string containing HTML');
+  assert(artifact?.image_data === undefined, 'image_data is undefined for UI subtype');
+  assert(result.images_generated === 1, 'images_generated is 1');
+}
+
+// ---------------------------------------------------------------------------
+// Test 26: generate_evidence_images — log type yields html_data (no API key needed)
+// ---------------------------------------------------------------------------
+
+console.log('\nTest 26: generate_evidence_images (log → html_data, no API key required)');
+{
+  const exerciseData = {
+    title: 'HTML Template Evidence Test',
+    targetAudience: 'SOC',
+    severity: 'HIGH',
+    injects: [],
+    gaps: [],
+    artifacts: [{
+      id: 'ART-002',
+      type: 'log',
+      title: 'Suspicious Outbound Traffic',
+      artifact_content: 'ALERT: outbound connection to 203.0.113.42:443\nDNS query: evil.example.com',
+    }],
+  };
+
+  const result = parseToolResult(
+    await client.callTool({ name: 'generate_evidence_images', arguments: { exercise_data: exerciseData } })
+  ) as { error?: string; updated_data?: { artifacts?: Array<{ html_data?: string; image_data?: string }> }; images_generated?: number };
+
+  assert(!result.error, 'No error for log type (HTML template path, no API key needed)');
+  const artifact = result.updated_data?.artifacts?.[0];
+  assert(typeof artifact?.html_data === 'string' && (artifact.html_data.includes('<html') || artifact.html_data.includes('<div')), 'html_data is a string containing HTML');
+  assert(artifact?.image_data === undefined, 'image_data is undefined for UI subtype');
+  assert(result.images_generated === 1, 'images_generated is 1');
 }
 
 // ---------------------------------------------------------------------------

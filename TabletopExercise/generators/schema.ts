@@ -140,6 +140,31 @@ export const KeyDiscoveryQuestionSchema = z.object({
   answer_and_facilitation: z.string(),
 });
 
+export const ImageSubtypeSchema = z.enum([
+  // Attack vector
+  'ransomware_note',
+  'phishing_email',
+  'fraudulent_invoice',
+  'usb_device',
+  // Evidence
+  'scada_interface',
+  'network_capture',
+  'dark_web_listing',
+  'network_diagram',
+  // Atmosphere
+  'period_photograph',
+  'portrait',
+  'location_illustration',
+  'cover_art',
+]);
+
+export const VisualStyleSchema = z.object({
+  art_style: z.string().optional(),     // "photorealistic" | "noir graphic novel"
+  color_palette: z.string().optional(), // "muted sepia" | "high-contrast blue-grey"
+  mood: z.string().optional(),          // "tense, clinical" | "cold, corporate"
+  seed: z.number().int().optional(),    // for deterministic generation
+});
+
 export const ArtifactSchema = z.object({
   id: z.string().min(1),
   type: z.enum(['screenshot', 'log', 'email', 'document', 'alert', 'other']),
@@ -155,6 +180,10 @@ export const ArtifactSchema = z.object({
   im_notes_bullets: z.array(z.string()).optional(),
   key_discovery_questions: z.array(KeyDiscoveryQuestionSchema).optional(),
   facilitation_notes: z.array(z.string()).optional(),
+  // Image generation fields
+  image_data: z.string().optional(),         // base64 data URI (data:image/png;base64,...)
+  html_data: z.string().optional(),          // self-contained HTML string for UI-based artifacts
+  image_subtype: ImageSubtypeSchema.optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -250,6 +279,10 @@ export const TabletopExerciseDataSchema = z.object({
   scenario: z.object({
     malmon_family: z.string().optional(),
   }).passthrough().optional(),
+
+  // Image generation fields
+  cover_image_data: z.string().optional(),   // base64 data URI for cover page
+  visual_style: VisualStyleSchema.optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -277,3 +310,5 @@ export type NPCDialogue = z.infer<typeof NPCDialogueSchema>;
 export type RedHerring = z.infer<typeof RedHerringSchema>;
 export type NPCDialogueLinesQMD = z.infer<typeof NPCDialogueLinesQMDSchema>;
 export type KeyDiscoveryQuestion = z.infer<typeof KeyDiscoveryQuestionSchema>;
+export type ImageSubtype = z.infer<typeof ImageSubtypeSchema>;
+export type VisualStyle = z.infer<typeof VisualStyleSchema>;

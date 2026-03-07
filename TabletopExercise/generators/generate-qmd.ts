@@ -123,15 +123,20 @@ const VARIATION_RE = /\{\{[^}]+\}\}/;
 
 /**
  * Wrap text in a variation block if it contains {{...}} placeholders.
- * If no region is specified in the data, uses a single default="true" block.
+ * Generates one block per region value (first gets default="true").
+ * If regions is empty (non-localized scenario), returns text unchanged --
+ * callers should have pre-resolved variables via resolveVariables().
  */
-export function wrapVariation(text: string, group = 'region', value = 'default'): string {
+export function wrapVariation(text: string, regions: string[] = []): string {
   if (!VARIATION_RE.test(text)) return text;
-  return (
-    `::: {.variation group="${group}" value="${value}" default="true"}\n` +
-    text + '\n' +
-    ':::\n'
-  );
+  if (regions.length === 0) return text;
+  return regions
+    .map((value, idx) =>
+      `::: {.variation group="region" value="${value}"${idx === 0 ? ' default="true"' : ''}}\n` +
+      text + '\n' +
+      ':::\n'
+    )
+    .join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -146,11 +151,37 @@ export function slugFromFilename(filename: string): string {
     .toLowerCase();
 }
 
+/** Strip any leading "handout-a-" / "handout-b-" prefix so callers don't double-prefix. */
+function stripHandoutPrefix(slug: string): string {
+  return slug.replace(/^handout-[a-z]-/, '');
+}
+
+/** Strip any leading "Handout A: " / "Handout B: " prefix from a title string. */
+function stripHandoutTitlePrefix(title: string): string {
+  return title.replace(/^Handout\s+[A-Z]:\s*/i, '');
+}
+
+/**
+ * Strip *"..."* formatting that agents may have pre-applied to read-aloud strings in JSON.
+ * The generator re-applies this formatting, so we must not double-wrap.
+ */
+function cleanReadAloud(s: string): string {
+  return s.replace(/^\*?"?/, '').replace(/"?\*?$/, '').trim();
+}
+
+/**
+ * Resolve {{variable}} placeholders in text using a flat key→value dict.
+ * Unresolved placeholders are left as-is.
+ */
+function resolveVariables(text: string, vars: Record<string, string>): string {
+  return text.replace(/\{\{([^}]+)\}\}/g, (_, key) => vars[key.trim()] ?? `{{${key}}}`);
+}
+
 // ---------------------------------------------------------------------------
 // Section renderers
 // ---------------------------------------------------------------------------
 
-function renderInjectSequence(injects: Inject[]): string {
+function renderInjectSequence(injects: Inject[], regions: string[] = [], scenarioVariables: Record<string, string> = {}): string {
   let out = heading(2, 'Inject Sequence');
   out += paragraph(
     '*The following injects are delivered by the IM at the trigger points described. ' +
@@ -166,9 +197,9 @@ function renderInjectSequence(injects: Inject[]): string {
       out += boldKV('Trigger', inject.trigger);
     }
 
-    const readAloud = inject.read_aloud ?? inject.scenario;
+    const readAloud = resolveVariables(cleanReadAloud(inject.read_aloud ?? inject.scenario ?? ''), scenarioVariables);
     out += '\n\n**Read Aloud:**\n';
-    out += paragraph(wrapVariation(`*"${readAloud}"*`));
+    out += paragraph(wrapVariation(`*"${readAloud}"*`, regions));
 
     if (inject.artifact_inline) {
       out += '\n**Inline Artifact:**\n';
@@ -188,11 +219,15 @@ function renderInjectSequence(injects: Inject[]): string {
     })) ?? [];
     if (branches.length > 0) {
       out += '\n**Conditional Branches:**';
-      out += bulletList(branches.map(b => `**If team ${b.condition}:** ${b.im_response}`));
+      out += bulletList(branches.map(b => {
+        // Strip a leading "Team " / "team " if the agent included it in the condition string
+        const condition = b.condition.replace(/^[Tt]eam\s+/, '');
+        return `**If the team ${condition}:** ${b.im_response}`;
+      }));
     }
 
     const notes: string[] = [];
-    if (inject.hint_if_stuck) notes.push(`*Hint if stuck:* *"${inject.hint_if_stuck}"*`);
+    if (inject.hint_if_stuck) notes.push(`*Hint if stuck:* *"${cleanReadAloud(resolveVariables(inject.hint_if_stuck, scenarioVariables))}"*`);
     if (inject.red_flag) notes.push(`*Red flag:* ${inject.red_flag}`);
     if (inject.success_indicator) notes.push(`*Success indicator:* ${inject.success_indicator}`);
     if (inject.expectedResponse && !inject.hint_if_stuck) notes.push(`*Expected response:* ${inject.expectedResponse}`);
@@ -214,7 +249,7 @@ function isQMDLines(lines: NPCDialogue['lines']): lines is NPCDialogueLinesQMD {
   );
 }
 
-function renderNPCDialogue(npcDialogue: NPCDialogue[]): string {
+function renderNPCDialogue(npcDialogue: NPCDialogue[], regions: string[] = [], scenarioVariables: Record<string, string> = {}): string {
   let out = heading(2, 'NPC Dialogue Scripts');
   out += paragraph(
     '*Verbatim lines for key NPCs at critical decision moments. Deliver in character ' +
@@ -223,8 +258,19 @@ function renderNPCDialogue(npcDialogue: NPCDialogue[]): string {
   );
 
   for (const npc of npcDialogue) {
-    const nameLabel = npc.npcName ? `${npc.role}: ${npc.npcName}` : npc.role;
-    out += heading(3, wrapVariation(nameLabel));
+    const rawName = npc.npcName ? `${npc.role}: ${npc.npcName}` : npc.role;
+    // If npcName contains {{variable}} and regions are provided, generate per-region headings
+    if (VARIATION_RE.test(rawName) && regions.length > 0) {
+      out += regions
+        .map((value, idx) =>
+          `::: {.variation group="region" value="${value}"${idx === 0 ? ' default="true"' : ''}}\n` +
+          heading(3, rawName) +
+          ':::\n'
+        )
+        .join('\n');
+    } else {
+      out += heading(3, resolveVariables(rawName, scenarioVariables));
+    }
 
     if (npc.triggerContext) {
       out += paragraph(npc.triggerContext);
@@ -232,17 +278,17 @@ function renderNPCDialogue(npcDialogue: NPCDialogue[]): string {
 
     if (isQMDLines(npc.lines)) {
       out += '\n**Under pressure** (when team delays or debates):\n';
-      out += paragraph(wrapVariation(`*"${npc.lines.under_pressure}"*`));
+      out += paragraph(wrapVariation(resolveVariables(`*"${cleanReadAloud(npc.lines.under_pressure)}"*`, scenarioVariables), regions));
 
       out += '\n**Escalating** (when situation worsens or deadline approaches):\n';
-      out += paragraph(wrapVariation(`*"${npc.lines.escalating}"*`));
+      out += paragraph(wrapVariation(resolveVariables(`*"${cleanReadAloud(npc.lines.escalating)}"*`, scenarioVariables), regions));
 
       out += '\n**Conceding** (when team presents a strong plan):\n';
-      out += paragraph(wrapVariation(`*"${npc.lines.conceding}"*`));
+      out += paragraph(wrapVariation(resolveVariables(`*"${cleanReadAloud(npc.lines.conceding)}"*`, scenarioVariables), regions));
     } else if (Array.isArray(npc.lines) && npc.lines.length > 0) {
       for (const line of npc.lines) {
         out += boldKV(line.prompt, '');
-        out += paragraph(wrapVariation(`*"${line.response}"*`));
+        out += paragraph(wrapVariation(resolveVariables(`*"${cleanReadAloud(line.response)}"*`, scenarioVariables), regions));
       }
     }
   }
@@ -250,7 +296,7 @@ function renderNPCDialogue(npcDialogue: NPCDialogue[]): string {
   return out;
 }
 
-function renderRedHerrings(redHerrings: RedHerring[]): string {
+function renderRedHerrings(redHerrings: RedHerring[], regions: string[] = [], scenarioVariables: Record<string, string> = {}): string {
   let out = heading(2, 'Red Herrings');
   out += paragraph(
     '*These false leads are built into the scenario. Do not shut down player investigation -- ' +
@@ -264,13 +310,13 @@ function renderRedHerrings(redHerrings: RedHerring[]): string {
     out += bulletList(rh.what_points_to_it);
     out += boldKV('Why it\'s wrong', rh.why_its_wrong);
     out += '\n\n**IM resolution script:** ';
-    out += paragraph(wrapVariation(`*"${rh.im_resolution_script}"*`));
+    out += paragraph(wrapVariation(resolveVariables(`*"${cleanReadAloud(rh.im_resolution_script)}"*`, scenarioVariables), regions));
   });
 
   return out;
 }
 
-function renderGapAnalysis(gaps: Gap[]): string {
+function renderGapAnalysis(gaps: Gap[], _regions: string[] = [], scenarioVariables: Record<string, string> = {}): string {
   let out = heading(2, 'Post-Session Gap Analysis');
   out += paragraph(
     '*Use this section during the debrief. Each gap is a real security control weakness ' +
@@ -296,7 +342,7 @@ function renderGapAnalysis(gaps: Gap[]): string {
     }
 
     if (debriefQ) {
-      out += boldKV('Debrief question', `*"${debriefQ}"*`);
+      out += boldKV('Debrief question', `*"${cleanReadAloud(resolveVariables(debriefQ, scenarioVariables))}"*`);
     }
   });
 
@@ -341,7 +387,12 @@ const HANDOUT_CSS = `\`\`\`{=html}
 </style>
 \`\`\``;
 
-function renderHandout(artifact: Artifact, malmonFamily: string): string {
+function renderHandout(
+  artifact: Artifact,
+  malmonFamily: string,
+  vars: Record<string, string> = {},
+  imageFilename?: string
+): string {
   const letter = artifact.handout_letter ?? 'A';
   const artifactContent = artifact.artifact_content ?? artifact.content ?? '';
 
@@ -349,12 +400,15 @@ function renderHandout(artifact: Artifact, malmonFamily: string): string {
     validateTestNetIPs(artifactContent);
   }
 
-  let out = `---\npagetitle: "Handout ${letter}: ${artifact.title} | ${malmonFamily}"\n---\n\n`;
+  // Strip any "Handout X: " prefix the agent may have included in the title
+  const cleanTitle = stripHandoutTitlePrefix(artifact.title);
+
+  let out = `---\npagetitle: "Handout ${letter}: ${cleanTitle} | ${malmonFamily}"\n---\n\n`;
   out += HANDOUT_CSS + '\n';
-  out += heading(1, `Handout ${letter}: ${artifact.title}`);
+  out += heading(1, `Handout ${letter}: ${cleanTitle}`);
 
   if (artifact.scene_context) {
-    out += paragraph(`*${artifact.scene_context}*`);
+    out += paragraph(`*${resolveVariables(artifact.scene_context, vars)}*`);
   }
 
   out += '\n---\n';
@@ -363,7 +417,13 @@ function renderHandout(artifact: Artifact, malmonFamily: string): string {
     out += heading(2, artifact.section_heading);
   }
 
-  if (artifactContent) {
+  if (imageFilename) {
+    // Render AI-generated image instead of code block
+    out += `\n![${cleanTitle}](./${imageFilename})\n`;
+    if (artifactContent) {
+      out += `\n*${artifactContent.slice(0, 200)}${artifactContent.length > 200 ? '...' : ''}*\n`;
+    }
+  } else if (artifactContent) {
     out += '\n```\n' + artifactContent + '\n```\n';
   }
 
@@ -410,7 +470,9 @@ export interface QMDGenerateResult {
 export async function generateExerciseQmd(
   data: TabletopExerciseData,
   outputDir: string,
-  appendTo: string
+  appendTo: string,
+  scenarioVariables: Record<string, string> = {},
+  regions: string[] = []
 ): Promise<QMDGenerateResult> {
   // Resolve scenario type (top-level or nested metadata)
   const scenarioType: ScenarioType =
@@ -429,34 +491,27 @@ export async function generateExerciseQmd(
   const sectionsWritten: string[] = [];
   let appendContent = '';
 
+  // Session Materials section (links to handouts and HTML) — written last after paths are known
+
   if (data.injects.length > 0) {
-    appendContent += safeQmd(renderInjectSequence(data.injects));
+    appendContent += safeQmd(renderInjectSequence(data.injects, regions, scenarioVariables));
     sectionsWritten.push('Inject Sequence');
   }
 
   if ((data.npcDialogue ?? []).length > 0) {
-    appendContent += safeQmd(renderNPCDialogue(data.npcDialogue!));
+    appendContent += safeQmd(renderNPCDialogue(data.npcDialogue!, regions, scenarioVariables));
     sectionsWritten.push('NPC Dialogue Scripts');
   }
 
   if ((data.red_herrings ?? []).length > 0) {
-    appendContent += safeQmd(renderRedHerrings(data.red_herrings!));
+    appendContent += safeQmd(renderRedHerrings(data.red_herrings!, regions, scenarioVariables));
     sectionsWritten.push('Red Herrings');
   }
 
   if (data.gaps.length > 0) {
-    appendContent += safeQmd(renderGapAnalysis(data.gaps));
+    appendContent += safeQmd(renderGapAnalysis(data.gaps, regions, scenarioVariables));
     sectionsWritten.push('Post-Session Gap Analysis');
   }
-
-  // Append sections to index.qmd
-  let existing = '';
-  try {
-    existing = await readFile(appendTo, 'utf-8');
-  } catch {
-    // File doesn't exist yet — start fresh
-  }
-  await writeFile(appendTo, existing + '\n' + appendContent, 'utf-8');
 
   // Write exercise-data.json to output_dir
   await writeFile(
@@ -476,18 +531,55 @@ export async function generateExerciseQmd(
   const handoutB = artifacts.find(a => a.handout_letter === 'B') ?? artifacts[1];
 
   if (handoutA) {
-    const slug = slugFromFilename(handoutA.filename ?? handoutA.id);
+    const slug = stripHandoutPrefix(slugFromFilename(handoutA.filename ?? handoutA.id));
     const handoutPath = join(outputDir, `handout-a-${slug}.qmd`);
-    await writeFile(handoutPath, safeQmd(renderHandout({ ...handoutA, handout_letter: 'A' }, malmonFamily)), 'utf-8');
+    let imageFilenameA: string | undefined;
+    if (handoutA.image_data) {
+      const b64 = handoutA.image_data.replace(/^data:image\/\w+;base64,/, '');
+      imageFilenameA = `handout-a-${slug}.png`;
+      await writeFile(join(outputDir, imageFilenameA), Buffer.from(b64, 'base64'));
+    }
+    await writeFile(handoutPath, safeQmd(renderHandout({ ...handoutA, handout_letter: 'A' }, malmonFamily, scenarioVariables, imageFilenameA)), 'utf-8');
     result.handout_a_path = handoutPath;
   }
 
   if (handoutB) {
-    const slug = slugFromFilename(handoutB.filename ?? handoutB.id);
+    const slug = stripHandoutPrefix(slugFromFilename(handoutB.filename ?? handoutB.id));
     const handoutPath = join(outputDir, `handout-b-${slug}.qmd`);
-    await writeFile(handoutPath, safeQmd(renderHandout({ ...handoutB, handout_letter: 'B' }, malmonFamily)), 'utf-8');
+    let imageFilenameB: string | undefined;
+    if (handoutB.image_data) {
+      const b64 = handoutB.image_data.replace(/^data:image\/\w+;base64,/, '');
+      imageFilenameB = `handout-b-${slug}.png`;
+      await writeFile(join(outputDir, imageFilenameB), Buffer.from(b64, 'base64'));
+    }
+    await writeFile(handoutPath, safeQmd(renderHandout({ ...handoutB, handout_letter: 'B' }, malmonFamily, scenarioVariables, imageFilenameB)), 'utf-8');
     result.handout_b_path = handoutPath;
   }
+
+  // Build Session Materials section with links to handouts and HTML outputs
+  const matLinks: string[] = [];
+  if (result.handout_a_path) {
+    matLinks.push(`[Handout A](${result.handout_a_path.split('/').pop()}){.btn .btn-outline-primary}`);
+  }
+  if (result.handout_b_path) {
+    matLinks.push(`[Handout B](${result.handout_b_path.split('/').pop()}){.btn .btn-outline-secondary}`);
+  }
+  matLinks.push(`[Facilitator HTML](facilitator.html){.btn .btn-success}`);
+  matLinks.push(`[Participant HTML](participant.html){.btn .btn-info}`);
+
+  const sessionMaterials =
+    heading(2, 'Session Materials') +
+    paragraph('*Download or print before the session. Handout files open as standalone pages.*') +
+    '\n' + matLinks.join('  \n') + '\n';
+
+  // Append Session Materials + four content sections to index.qmd
+  let existing = '';
+  try {
+    existing = await readFile(appendTo, 'utf-8');
+  } catch {
+    // File doesn't exist yet — start fresh
+  }
+  await writeFile(appendTo, existing + '\n' + sessionMaterials + appendContent, 'utf-8');
 
   return result;
 }

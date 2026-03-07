@@ -24,14 +24,38 @@ import { fileURLToPath } from 'url';
 import {
   TabletopExerciseDataSchema,
   ScenarioTypeSchema,
+  VisualStyleSchema,
+  ImageSubtypeSchema,
   type ScenarioType,
   type SectionPresence,
 } from './schema.ts';
+import {
+  generateAttackVectorImages,
+  generateEvidenceImages,
+  generateAtmosphereImages,
+  type AtmosphereContext,
+} from './generate-images.ts';
 import { generateTabletopHTML } from './generate-pdf.ts';
 import { generateExerciseQmd } from './generate-qmd.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// ---------------------------------------------------------------------------
+// Load .env from the generators directory (API keys for image generation)
+// ---------------------------------------------------------------------------
+
+try {
+  const envContent = await readFile(resolve(__dirname, '.env'), 'utf-8');
+  for (const line of envContent.split('\n')) {
+    const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (match) {
+      const [, key, val] = match;
+      process.env[key] ??= val.replace(/^["']|["']$/g, '').trim();
+    }
+  }
+} catch { /* no .env file present — API keys must come from shell environment */ }
+
 
 // ---------------------------------------------------------------------------
 // Security helpers
@@ -545,8 +569,14 @@ server.tool(
     exercise_data: z.record(z.unknown()).describe('Validated exercise data object'),
     output_dir: z.string().describe('Scenario directory for handout files and exercise-data.json'),
     append_to: z.string().describe('Path to index.qmd — the 4 sections are appended here'),
+    scenario_variables: z.record(z.string()).optional().describe('Flat key→value map of scenario variables (e.g. hospital_name) for resolving {{placeholders}} in handout files'),
+    regions: z.array(z.string()).optional().describe(
+      'Region values extracted from scenario-variables frontmatter (e.g. ["us", "dk"]). '
+      + 'Derive from region_* keys: region_us → "us", region_dk → "dk". '
+      + 'Omit entirely for non-localized scenarios -- variables will be resolved inline.'
+    ),
   },
-  async ({ exercise_data, output_dir, append_to }) => {
+  async ({ exercise_data, output_dir, append_to, scenario_variables, regions }) => {
     if (!rejectTraversal(output_dir) || !rejectTraversal(append_to)) {
       return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Path traversal rejected' }) }] };
     }
@@ -561,7 +591,9 @@ server.tool(
       const result = await generateExerciseQmd(
         parsed.data as Parameters<typeof generateExerciseQmd>[0],
         output_dir,
-        append_to
+        append_to,
+        scenario_variables ?? {},
+        regions ?? []
       );
       return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
     } catch (err) {
@@ -631,6 +663,143 @@ server.tool(
     }
 
     return { content: [{ type: 'text' as const, text: JSON.stringify(results, null, 2) }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool 8: generate_attack_vector_images
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'generate_attack_vector_images',
+  'Generate AI images for attack-vector artifacts (phishing emails, ransomware notes, fraudulent invoices, USB devices). Requires IMAGE_PROVIDER env var and corresponding API key. Returns updated_data with image_data populated on each artifact.',
+  {
+    exercise_data: z.record(z.unknown()).describe('Validated exercise data object'),
+    visual_style: VisualStyleSchema.optional().describe('Style consistency settings shared across the scenario'),
+  },
+  async ({ exercise_data, visual_style }) => {
+    const parsed = TabletopExerciseDataSchema.safeParse(exercise_data);
+    if (!parsed.success) {
+      const errors = parsed.error.issues.map(i => ({ path: i.path.join('.'), message: i.message }));
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Schema validation failed', errors }) }] };
+    }
+
+    const artifacts = parsed.data.artifacts ?? [];
+    if (artifacts.length === 0) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_data: parsed.data, images_generated: 0, provider_used: process.env.IMAGE_PROVIDER ?? 'openai' }) }] };
+    }
+
+    try {
+      const { updatedArtifacts, imagesGenerated, providerUsed } = await generateAttackVectorImages(
+        artifacts,
+        visual_style ?? parsed.data.visual_style
+      );
+      const updatedData = { ...parsed.data, artifacts: updatedArtifacts, visual_style: visual_style ?? parsed.data.visual_style };
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_data: updatedData, images_generated: imagesGenerated, provider_used: providerUsed }) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }] };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool 9: generate_evidence_images
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'generate_evidence_images',
+  'Generate AI images for evidence artifacts (network diagrams, SIEM logs, dark web listings, SCADA interfaces). Requires IMAGE_PROVIDER env var and corresponding API key.',
+  {
+    exercise_data: z.record(z.unknown()).describe('Validated exercise data object'),
+    visual_style: VisualStyleSchema.optional().describe('Style consistency settings shared across the scenario'),
+  },
+  async ({ exercise_data, visual_style }) => {
+    const parsed = TabletopExerciseDataSchema.safeParse(exercise_data);
+    if (!parsed.success) {
+      const errors = parsed.error.issues.map(i => ({ path: i.path.join('.'), message: i.message }));
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Schema validation failed', errors }) }] };
+    }
+
+    const artifacts = parsed.data.artifacts ?? [];
+    if (artifacts.length === 0) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_data: parsed.data, images_generated: 0, provider_used: process.env.IMAGE_PROVIDER ?? 'openai' }) }] };
+    }
+
+    try {
+      const { updatedArtifacts, imagesGenerated, providerUsed } = await generateEvidenceImages(
+        artifacts,
+        visual_style ?? parsed.data.visual_style
+      );
+      const updatedData = { ...parsed.data, artifacts: updatedArtifacts, visual_style: visual_style ?? parsed.data.visual_style };
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_data: updatedData, images_generated: imagesGenerated, provider_used: providerUsed }) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }] };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool 10: generate_atmosphere_images
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'generate_atmosphere_images',
+  'Generate AI atmosphere images: cover art, NPC portraits, location illustrations, period photographs. Requires IMAGE_PROVIDER env var and corresponding API key.',
+  {
+    exercise_data: z.record(z.unknown()).describe('Validated exercise data object'),
+    subtypes: z.array(ImageSubtypeSchema).optional().describe('Limit which atmosphere subtypes to generate (default: cover_art + portrait for each NPC)'),
+    visual_style: VisualStyleSchema.optional().describe('Style consistency settings shared across the scenario'),
+  },
+  async ({ exercise_data, subtypes, visual_style }) => {
+    const parsed = TabletopExerciseDataSchema.safeParse(exercise_data);
+    if (!parsed.success) {
+      const errors = parsed.error.issues.map(i => ({ path: i.path.join('.'), message: i.message }));
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Schema validation failed', errors }) }] };
+    }
+
+    const atmosphereSubtypes = new Set(subtypes ?? ['cover_art', 'portrait']);
+    const style = visual_style ?? parsed.data.visual_style;
+    const scenarioTitle = parsed.data.title;
+    const scenarioOverview = parsed.data.scenarioOverview;
+
+    const contexts: AtmosphereContext[] = [];
+
+    if (atmosphereSubtypes.has('cover_art')) {
+      contexts.push({ scenario_title: scenarioTitle, scenario_overview: scenarioOverview, subtype: 'cover_art' });
+    }
+
+    if (atmosphereSubtypes.has('portrait')) {
+      for (const npc of (parsed.data.npcDialogue ?? [])) {
+        contexts.push({
+          scenario_title: scenarioTitle,
+          npc_name: npc.npcName,
+          npc_role: npc.role,
+          subtype: 'portrait',
+        });
+      }
+    }
+
+    if (atmosphereSubtypes.has('location_illustration') || atmosphereSubtypes.has('period_photograph')) {
+      const subtype = atmosphereSubtypes.has('period_photograph') ? 'period_photograph' : 'location_illustration';
+      contexts.push({ scenario_title: scenarioTitle, scenario_overview: scenarioOverview, subtype });
+    }
+
+    if (contexts.length === 0) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_data: parsed.data, images_generated: 0, provider_used: process.env.IMAGE_PROVIDER ?? 'openai' }) }] };
+    }
+
+    try {
+      const { results, imagesGenerated, providerUsed } = await generateAtmosphereImages(contexts, style);
+
+      // Attach cover_image_data to root data
+      const coverResult = results.find(r => r.subtype === 'cover_art');
+      const updatedData: Record<string, unknown> = { ...parsed.data };
+      if (coverResult) updatedData.cover_image_data = coverResult.image_data;
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_data: updatedData, images_generated: imagesGenerated, provider_used: providerUsed, atmosphere_images: results.map(r => ({ subtype: r.subtype })) }) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }] };
+    }
   }
 );
 
