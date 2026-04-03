@@ -1,12 +1,14 @@
-# TabletopExercise Skill
+# TabletopExercise
 
 **Comprehensive cybersecurity tabletop exercise design and facilitation framework**
+
+TabletopExercise is both a **PAI skill** and an **MCP server**. As a PAI skill it guides an AI agent through designing, facilitating, and evaluating exercises interactively. As an MCP server it exposes 7 schema-validated tools that any AI coding agent (Claude Code, Gemini CLI, Codex CLI, Mistral Vibe) can call programmatically to generate, validate, and enrich exercise materials.
 
 ---
 
 ## Overview
 
-Enhanced from the original SOC Manager Table Top Designer, this PAI skill provides a complete methodology for designing, facilitating, and evaluating cybersecurity tabletop exercises for both technical and executive audiences.
+Enhanced from the original SOC Manager Table Top Designer, this framework provides a complete methodology for designing, facilitating, and evaluating cybersecurity tabletop exercises for both technical and executive audiences.
 
 **Key Enhancements:**
 - ✅ **Technical Atomics**: Executable inject sequences for realistic scenario delivery
@@ -84,13 +86,123 @@ Goal: Identify gaps and improve processes
 
 ---
 
+## MCP Server
+
+The TabletopExercise skill also ships as an **MCP (Model Context Protocol) server**, allowing any AI coding agent to call it programmatically to enrich scenario cards in a schema-validated, additive-only way.
+
+### Setup
+
+Replace `/path/to/TabletopExercise/generators/mcp-server.ts` with the absolute path on your machine.
+
+#### Claude Code (CLI)
+
+```bash
+claude mcp add tabletop-exercise -- bun run /path/to/TabletopExercise/generators/mcp-server.ts
+```
+
+#### Gemini CLI
+
+Add to `~/.gemini/settings.json` (global) or `.gemini/settings.json` (project):
+
+```json
+{
+  "mcpServers": {
+    "tabletop-exercise": {
+      "command": "bun",
+      "args": ["run", "/path/to/TabletopExercise/generators/mcp-server.ts"]
+    }
+  }
+}
+```
+
+#### OpenAI Codex CLI
+
+Via CLI:
+
+```bash
+codex mcp add tabletop-exercise -- bun run /path/to/TabletopExercise/generators/mcp-server.ts
+```
+
+Or add to `~/.codex/config.toml` (global) or `.codex/config.toml` (project):
+
+```toml
+[mcp_servers.tabletop-exercise]
+command = "bun"
+args = ["run", "/path/to/TabletopExercise/generators/mcp-server.ts"]
+```
+
+#### Mistral Vibe (CLI)
+
+Add to `~/.vibe/config.toml` (global) or `.vibe/config.toml` (project):
+
+```toml
+[mcp_servers.tabletop-exercise]
+command = "bun"
+args = ["run", "/path/to/TabletopExercise/generators/mcp-server.ts"]
+```
+
+### Tools (7)
+
+| Tool | Description |
+|------|-------------|
+| `check_scenario_completeness` | Parse a `.qmd` scenario card and return which enrichment sections are present/missing |
+| `validate_exercise_data` | Validate an exercise-data object against the Zod schema; returns structured errors |
+| `generate_exercise` | Produce `facilitator.html` + `participant.html` from exercise-data |
+| `merge_exercise_data` | Additive-only merge — never overwrites existing keys in the base JSON |
+| `validate_m_and_m_formatting` | Enforce M&M-specific rules (contemporary vs. historical scenario types) |
+| `generate_exercise_qmd` | Generate native Quarto markdown: 4 sections appended to `index.qmd` + handout QMD files |
+| `list_scenario_cards` | Walk a directory tree and return a completeness summary for every `.qmd` found |
+
+### Resources (3)
+
+| URI | Content |
+|-----|---------|
+| `tabletop://schema` | Full JSON Schema derived from Zod — describes every field and enrichment section |
+| `tabletop://atomics` | Full content of `ATOMICS-LIBRARY.md` |
+| `tabletop://template` | Annotated template showing how each schema field maps to HTML output |
+
+### `generate_exercise_qmd` output
+
+Given a validated `exercise-data.json`, this tool appends four sections to a Quarto `index.qmd`:
+
+1. **Inject Sequence** — timed injects with read-aloud text, conditional branches, IM notes
+2. **NPC Dialogue Scripts** — verbatim lines with three emotional beats (under pressure / escalating / conceding)
+3. **Red Herrings** — false leads with resolution scripts
+4. **Post-Session Gap Analysis** — debrief-focused gap write-ups with remediation lists
+
+It also writes `handout-a-[slug].qmd` and `handout-b-[slug].qmd` with print-safe CSS, IM-notes divs, and key discovery questions.
+
+**Guards enforced before any file is written:**
+- Em dash (`—`) in generated text → error (use `--` instead)
+- Contemporary scenario `read_aloud` naming the malmon family → error
+- `artifact_content` containing non-TEST-NET IP addresses → error
+- Path traversal (`..`) in any file path argument → rejected
+
+### Running the tests
+
+```bash
+cd TabletopExercise/generators
+bun run test-mcp.ts   # 63 assertions across 18 test groups — all in-process via InMemoryTransport
+```
+
+---
+
 ## File Structure
 
 ```
-/root/.claude/skills/TabletopExercise/
-├── README.md              # This file - overview and quick start
-├── SKILL.md              # Main skill definition (PAI integration)
-└── ATOMICS-LIBRARY.md    # Pre-built technical inject sequences
+TabletopExercise/
+├── README.md                  # This file
+├── SKILL.md                   # PAI skill definition
+├── ATOMICS-LIBRARY.md         # Pre-built atomic inject sequences
+└── generators/
+    ├── mcp-server.ts          # MCP server (7 tools + 3 resources)
+    ├── schema.ts              # Zod schemas — single source of truth
+    ├── generate-qmd.ts        # Native Quarto markdown generator
+    ├── generate-pdf.ts        # PDF/HTML generator (core rendering logic)
+    ├── generate-html.ts       # Standalone HTML generator
+    ├── generate-both.ts       # Facilitator + participant HTML pair
+    ├── test-mcp.ts            # Integration tests (InMemoryTransport)
+    └── package.json
 ```
 
 **Generated Outputs** (when skill is invoked):
@@ -103,6 +215,15 @@ Goal: Identify gaps and improve processes
     ├── evaluation-forms.md         # Observer templates
     ├── after-action-report.md      # Post-exercise findings
     └── gap-analysis-checklist.md   # Missing SOPs/playbooks
+```
+
+**MCP server outputs** (when `generate_exercise_qmd` is called):
+```
+[scenario-dir]/
+├── index.qmd                       # 4 sections appended (inject sequence, NPC dialogue, red herrings, gap analysis)
+├── handout-a-[slug].qmd            # Player handout A (print-safe)
+├── handout-b-[slug].qmd            # Player handout B (print-safe, if present)
+└── exercise-data.json              # Validated exercise data (serialized)
 ```
 
 ---
@@ -613,6 +734,15 @@ Skill enhanced with learnings from:
 ---
 
 ## Version History
+
+**v3.0** (2026-03-07) - MCP Server + Quarto Output
+- Added MCP server (`mcp-server.ts`) with 7 tools and 3 resources
+- Added `schema.ts` — Zod v3 schemas as single source of truth for types, validation, and JSON Schema resource
+- Added `generate_exercise_qmd` tool for native Quarto markdown output (inject sequence, NPC dialogue, red herrings, gap analysis, handout QMD files)
+- Added M&M-specific validation: contemporary/historical scenario type rules, malmon family name guards, TEST-NET IP enforcement, em dash guard
+- Added `merge_exercise_data` additive-only merge tool
+- Added 63-assertion integration test suite using `InMemoryTransport` (18 test groups)
+- Verified against M&M scenario cards: handout CSS, `quarto render` clean output, all 13 malmon family names
 
 **v2.0** (2026-02-06) - Enhanced PAI Skill
 - Added technical atomics generation for exercise runners
